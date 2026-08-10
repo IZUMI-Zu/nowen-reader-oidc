@@ -497,9 +497,16 @@ func AddTagsToComicReplacingMatching(comicID string, tagNames []string, shouldRe
 		return err
 	}
 	defer tx.Rollback()
+	if err := addTagsToComicReplacingMatching(tx, comicID, tagNames, shouldReplace); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func addTagsToComicReplacingMatching(database tagDatabase, comicID string, tagNames []string, shouldReplace func(string) bool) error {
 	var removedTagIDs []int
 	if shouldReplace != nil {
-		rows, err := tx.Query(`
+		rows, err := database.Query(`
 			SELECT t."id", t."name"
 			FROM "ComicTag" ct
 			JOIN "Tag" t ON t."id" = ct."tagId"
@@ -527,7 +534,7 @@ func AddTagsToComicReplacingMatching(comicID string, tagNames []string, shouldRe
 			return err
 		}
 		for _, tagID := range removedTagIDs {
-			if _, err := tx.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ? AND "tagId" = ?`, comicID, tagID); err != nil {
+			if _, err := database.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ? AND "tagId" = ?`, comicID, tagID); err != nil {
 				return err
 			}
 		}
@@ -538,22 +545,40 @@ func AddTagsToComicReplacingMatching(comicID string, tagNames []string, shouldRe
 		if name == "" {
 			continue
 		}
-		if _, err := tx.Exec(`INSERT INTO "Tag" ("name") VALUES (?) ON CONFLICT("name") DO NOTHING`, name); err != nil {
+		if _, err := database.Exec(`INSERT INTO "Tag" ("name") VALUES (?) ON CONFLICT("name") DO NOTHING`, name); err != nil {
 			return err
 		}
 		var tagID int
-		if err := tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID); err != nil {
+		if err := database.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO "ComicTag" ("comicId", "tagId") VALUES (?, ?) ON CONFLICT DO NOTHING`, comicID, tagID); err != nil {
+		if _, err := database.Exec(`INSERT INTO "ComicTag" ("comicId", "tagId") VALUES (?, ?) ON CONFLICT DO NOTHING`, comicID, tagID); err != nil {
 			return err
 		}
 	}
 
 	for _, tagID := range removedTagIDs {
-		if err := deleteTagIfUnreferenced(tx, tagID); err != nil {
+		if err := deleteTagIfUnreferenced(database, tagID); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// UpdateComicFieldsAndTagsReplacingMatching commits metadata fields and the
+// normalized tag set together. This prevents a failed EH/EX source-tag write
+// from leaving metadataSource/Genre pointing at a different gallery.
+func UpdateComicFieldsAndTagsReplacingMatching(comicID string, fields map[string]interface{}, tagNames []string, shouldReplace func(string) bool) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateComicFields(tx, comicID, fields); err != nil {
+		return err
+	}
+	if err := addTagsToComicReplacingMatching(tx, comicID, tagNames, shouldReplace); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

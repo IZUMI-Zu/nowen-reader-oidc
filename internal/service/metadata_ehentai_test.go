@@ -559,6 +559,59 @@ func TestApplyEHentaiMetadataReplacesStaleGallerySourceTag(t *testing.T) {
 	}
 }
 
+func TestApplyEHentaiMetadataRollsBackFieldsWhenSourceTagWriteFails(t *testing.T) {
+	setupTestDB(t)
+	oldSource := "source:https://e-hentai.org/g/61/aaaaaaaaaa"
+	newSource := "source:https://exhentai.org/g/62/bbbbbbbbbb"
+	if _, err := store.DB().Exec(`
+		INSERT INTO "Comic" ("id", "filename", "title", "genre", "metadataSource")
+		VALUES ('eh-atomic-apply', 'atomic.cbz', 'Old title', ?, 'ehentai')
+	`, oldSource); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddTagsToComic("eh-atomic-apply", []string{oldSource, "user:favorite"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER "fail_atomic_comic_source_tag"
+		BEFORE INSERT ON "ComicTag"
+		WHEN (SELECT "name" FROM "Tag" WHERE "id" = NEW."tagId") = 'source:https://exhentai.org/g/62/bbbbbbbbbb'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced comic source association failure');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ApplyMetadata("eh-atomic-apply", ComicMetadata{
+		Title:  "New title",
+		Genre:  "artist:new artist, " + newSource,
+		Source: config.EHentaiSiteRestricted,
+	}, "en", true); err == nil {
+		t.Fatal("ApplyMetadata unexpectedly succeeded")
+	}
+	comic, err := store.GetComicByID("eh-atomic-apply")
+	if err != nil || comic == nil {
+		t.Fatalf("load comic after rollback: %v", err)
+	}
+	if comic.Title != "Old title" || comic.Genre != oldSource || comic.MetadataSource != config.EHentaiSitePublic {
+		t.Fatalf("comic fields escaped rollback: %#v", comic)
+	}
+	gotTags := make([]string, 0, len(comic.Tags))
+	for _, tag := range comic.Tags {
+		gotTags = append(gotTags, tag.Name)
+	}
+	wantTags := map[string]bool{oldSource: true, "user:favorite": true}
+	if len(gotTags) != len(wantTags) {
+		t.Fatalf("tags after rollback = %#v, want %#v", gotTags, wantTags)
+	}
+	for _, tag := range gotTags {
+		if !wantTags[tag] {
+			t.Fatalf("unexpected tag after rollback %q: %#v", tag, gotTags)
+		}
+	}
+}
+
 func newLocalEHProvider(t *testing.T, server *httptest.Server, cfg config.EHentaiConfig) *ehentaiProvider {
 	t.Helper()
 	base, err := url.Parse(server.URL + "/")

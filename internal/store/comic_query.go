@@ -1431,6 +1431,10 @@ func UpdateComicSync(comicID string, lastReadPage int, lastReadAt *time.Time, is
 
 // UpdateComicFields 更新漫画的任意字段。
 func UpdateComicFields(comicID string, fields map[string]interface{}) error {
+	return updateComicFields(db, comicID, fields)
+}
+
+func updateComicFields(database tagDatabase, comicID string, fields map[string]interface{}) error {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -1449,7 +1453,7 @@ func UpdateComicFields(comicID string, fields map[string]interface{}) error {
 	args = append(args, comicID)
 
 	query := fmt.Sprintf(`UPDATE "Comic" SET %s WHERE "id" = ?`, strings.Join(setClauses, ", "))
-	_, err := db.Exec(query, args...)
+	_, err := database.Exec(query, args...)
 	return err
 }
 

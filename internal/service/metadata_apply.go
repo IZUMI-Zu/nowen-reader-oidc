@@ -105,7 +105,28 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 		updates[k] = v
 	}
 
-	if len(updates) > 0 {
+	// Resolve normalized tags before writing so comic fields and the EH/EX
+	// gallery identity can be committed by one store transaction.
+	var tagNames []string
+	var replaceMatcher func(string) bool
+	if meta.Genre != "" {
+		for _, rawTag := range strings.Split(meta.Genre, ",") {
+			tagName := strings.TrimSpace(rawTag)
+			if tagName == "" {
+				continue
+			}
+			tagNames = append(tagNames, tagName)
+			if IsEHentaiGallerySourceTag(tagName) {
+				replaceMatcher = IsEHentaiGallerySourceTag
+			}
+		}
+	}
+
+	if len(tagNames) > 0 {
+		if err := store.UpdateComicFieldsAndTagsReplacingMatching(comicID, updates, tagNames, replaceMatcher); err != nil {
+			return nil, fmt.Errorf("update comic metadata and tags: %w", err)
+		}
+	} else if len(updates) > 0 {
 		if err := store.UpdateComicFields(comicID, updates); err != nil {
 			return nil, fmt.Errorf("update comic fields: %w", err)
 		}
@@ -120,30 +141,6 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 				log.Printf("[metadata] Cover cache failed for %s: %v", comicID, err)
 			}
 		}()
-	}
-
-	// Add genres as tags
-	if meta.Genre != "" {
-		genres := strings.Split(meta.Genre, ",")
-		var tagNames []string
-		for _, g := range genres {
-			g = strings.TrimSpace(g)
-			if g != "" {
-				tagNames = append(tagNames, g)
-			}
-		}
-		if len(tagNames) > 0 {
-			var replaceMatcher func(string) bool
-			for _, tagName := range tagNames {
-				if IsEHentaiGallerySourceTag(tagName) {
-					replaceMatcher = IsEHentaiGallerySourceTag
-					break
-				}
-			}
-			if err := store.AddTagsToComicReplacingMatching(comicID, tagNames, replaceMatcher); err != nil {
-				return nil, fmt.Errorf("add metadata tags: %w", err)
-			}
-		}
 	}
 
 	return store.GetComicByID(comicID)

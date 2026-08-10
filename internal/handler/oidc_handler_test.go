@@ -808,3 +808,20 @@ func TestOIDCOnlyUserCanSetInitialPasswordOnlyAfterRecentAuthentication(t *testi
 		t.Fatalf("second initial-password attempt status = %d, want 409", second.Code)
 	}
 }
+
+func TestPasswordChangeRejectsUnusableBreakGlassPassword(t *testing.T) {
+	router := setupTestRouter(t)
+	cookie := registerAndLogin(t, router)
+	for _, password := range []string{"", "12345"} {
+		response := performAuthedRequest(router, http.MethodPut, "/api/auth/users", map[string]string{
+			"action": "changePassword", "oldPassword": "password123", "newPassword": password,
+		}, cookie)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("new password %q status = %d: %s", password, response.Code, response.Body.String())
+		}
+	}
+	user, err := store.GetUserByUsername("admin")
+	if err != nil || user == nil || bcrypt.CompareHashAndPassword([]byte(user.Password), []byte("password123")) != nil {
+		t.Fatalf("rejected password change altered the recovery credential: user=%+v err=%v", user, err)
+	}
+}

@@ -41,6 +41,7 @@ type oidcRuntime interface {
 }
 
 const passwordLoginDisabledCode = "password_login_disabled"
+const minimumPasswordLength = 6
 
 func NewAuthHandler() *AuthHandler {
 	runtime, err := NewOIDCRuntime()
@@ -117,7 +118,7 @@ func (h *AuthHandler) registerWithState(c *gin.Context, state oidcruntime.State)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if len(req.Password) < 6 {
+	if len(req.Password) < minimumPasswordLength {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
 		return
 	}
@@ -320,7 +321,7 @@ func (h *AuthHandler) SetInitialPassword(c *gin.Context) {
 	var req struct {
 		NewPassword string `json:"newPassword"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < 6 {
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < minimumPasswordLength {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters"})
 		return
 	}
@@ -465,6 +466,10 @@ func (h *AuthHandler) UpdateUser(c *gin.Context) {
 
 	switch req.Action {
 	case "changePassword":
+		if len(req.NewPassword) < minimumPasswordLength {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters"})
+			return
+		}
 		targetID := req.UserID
 		if targetID == "" {
 			targetID = currentUser.ID
@@ -628,7 +633,7 @@ func (h *AuthHandler) CreateUserByAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if len(req.Password) < 6 {
+	if len(req.Password) < minimumPasswordLength {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
 		return
 	}

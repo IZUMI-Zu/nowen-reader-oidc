@@ -30,8 +30,9 @@ import {
   Eye,
   ChevronRight,
   Settings as SettingsIcon,
+  KeyRound,
 } from "lucide-react";
-import { useTranslation } from "@/lib/i18n";
+import { useLocale, useTranslation } from "@/lib/i18n";
 import { useAuth } from "@/lib/auth-context";
 import { formatAppVersion } from "@/lib/version";
 import { useReaderOptions } from "@/hooks/useReaderOptions";
@@ -80,6 +81,11 @@ const AccountPanel = dynamic(
   { loading: LoadingSkeleton }
 );
 
+const OIDCSettingsPanel = dynamic(
+  () => import("@/components/OIDCSettingsPanel").then((mod) => mod.OIDCSettingsPanel),
+  { loading: LoadingSkeleton }
+);
+
 const LibraryManagementPanel = dynamic(
   () => import("@/components/LibraryManagementPanel").then((mod) => mod.LibraryManagementPanel),
   { loading: LoadingSkeleton }
@@ -98,6 +104,7 @@ const NASDiagnosticsPanel = dynamic(
 /* ── 类型 ── */
 type SettingsTab =
   | "account"
+  | "authentication"
   | "site"
   | "ai"
   | "scan-rules"
@@ -150,13 +157,14 @@ export default function SettingsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const t = useTranslation();
+  const { locale } = useLocale();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
 
   const validTabs: SettingsTab[] = [
     "account",
     ...(isAdmin
-      ? ["site" as const, "ai" as const, "scan-rules" as const, "users" as const, "stats" as const, "file-stats" as const, "logs" as const, "libraries" as const, "user-groups" as const, "diagnostics" as const, "reader" as const, "data-admin" as const, "data-qa" as const, "sync-backup" as const]
+      ? ["site" as const, "authentication" as const, "ai" as const, "scan-rules" as const, "users" as const, "stats" as const, "file-stats" as const, "logs" as const, "libraries" as const, "user-groups" as const, "diagnostics" as const, "reader" as const, "data-admin" as const, "data-qa" as const, "sync-backup" as const]
       : []),
     "about",
   ];
@@ -198,6 +206,7 @@ export default function SettingsPage() {
         ...(isAdmin
           ? [
               { id: "site" as const, label: "站点设置", icon: <Globe className="h-[18px] w-[18px]" />, desc: "名称、目录、缓存", keywords: ["站点", "目录", "缓存", "site", "cache"] },
+              { id: "authentication" as const, label: locale === "zh-CN" ? "统一登录" : "Single sign-on", icon: <KeyRound className="h-[18px] w-[18px]" />, desc: locale === "zh-CN" ? "OIDC、登录策略、恢复保护" : "OIDC, sign-in policy, recovery", keywords: ["OIDC", "SSO", "登录", "认证", "authentication", "identity"] },
               { id: "reader" as const, label: "阅读器偏好", icon: <Eye className="h-[18px] w-[18px]" />, desc: "方向、缩放、翻页、背景", keywords: ["reader", "reading", "page", "zoom", "direction", "animation", "progress", "阅读器", "阅读", "方向", "缩放", "翻页", "页码", "进度"] },
             ]
           : []),
@@ -303,6 +312,7 @@ export default function SettingsPage() {
       }`}
     >
       {activeTab === "account" && <AccountPanel />}
+      {activeTab === "authentication" && <OIDCSettingsPanel />}
       {activeTab === "site" && <SiteSettingsPanel />}
       {activeTab === "ai" && <AISettingsPanel />}
       {activeTab === "scan-rules" && <ScanRulesPanel />}

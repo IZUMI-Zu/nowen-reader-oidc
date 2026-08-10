@@ -125,6 +125,7 @@ func TestBeginRequiresSessionUserOnlyForAccountBoundPurposes(t *testing.T) {
 		{Purpose: oidcauth.PurposeLogin, SessionUserID: "unexpected", ReturnTo: "/reader/"},
 		{Purpose: oidcauth.PurposeLink, ReturnTo: "/reader/"},
 		{Purpose: oidcauth.PurposeReauth, ReturnTo: "/reader/"},
+		{Purpose: oidcauth.PurposeConfigTest, ReturnTo: "/reader/"},
 	} {
 		if _, err := service.Begin(context.Background(), request); !errors.Is(err, oidcauth.ErrInvalidTransaction) {
 			t.Fatalf("Begin(%+v) error = %v, want ErrInvalidTransaction", request, err)
@@ -132,44 +133,48 @@ func TestBeginRequiresSessionUserOnlyForAccountBoundPurposes(t *testing.T) {
 	}
 }
 
-func TestReauthRequiresFreshProviderAuthenticationTime(t *testing.T) {
+func TestInteractivePurposesRequireFreshProviderAuthenticationTime(t *testing.T) {
 	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
-	for _, tt := range []struct {
-		name     string
-		authTime time.Time
-		wantErr  bool
-	}{
-		{name: "fresh", authTime: now, wantErr: false},
-		{name: "missing", wantErr: true},
-		{name: "stale SSO", authTime: now.Add(-time.Hour), wantErr: true},
-		{name: "future", authTime: now.Add(5 * time.Minute), wantErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			provider := &fakeProvider{}
-			transactions := &fakeTransactions{}
-			service := oidcauth.NewService(provider, transactions, oidcauth.Options{
-				BasePath: "/reader", TransactionTTL: 5 * time.Minute, Now: func() time.Time { return now },
-			})
-			begin, err := service.Begin(context.Background(), oidcauth.BeginRequest{
-				Purpose: oidcauth.PurposeReauth, SessionUserID: "user-1", ReturnTo: "/reader/settings",
-			})
-			if err != nil {
-				t.Fatalf("Begin() error = %v", err)
-			}
-			if provider.purpose != oidcauth.PurposeReauth {
-				t.Fatalf("provider purpose = %q", provider.purpose)
-			}
-			provider.identity = oidcauth.VerifiedIdentity{
-				Issuer: provider.Issuer(), Subject: "subject", Nonce: provider.nonce, AuthTime: tt.authTime,
-			}
-			_, err = service.Complete(context.Background(), oidcauth.CallbackRequest{
-				State: provider.state, Code: "code", BindingToken: begin.BindingToken,
-			})
-			if tt.wantErr && !errors.Is(err, oidcauth.ErrInvalidIdentity) {
-				t.Fatalf("Complete() error = %v, want ErrInvalidIdentity", err)
-			}
-			if !tt.wantErr && err != nil {
-				t.Fatalf("Complete() error = %v", err)
+	for _, purpose := range []oidcauth.Purpose{oidcauth.PurposeReauth, oidcauth.PurposeConfigTest} {
+		t.Run(string(purpose), func(t *testing.T) {
+			for _, tt := range []struct {
+				name     string
+				authTime time.Time
+				wantErr  bool
+			}{
+				{name: "fresh", authTime: now, wantErr: false},
+				{name: "missing", wantErr: true},
+				{name: "stale SSO", authTime: now.Add(-time.Hour), wantErr: true},
+				{name: "future", authTime: now.Add(5 * time.Minute), wantErr: true},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					provider := &fakeProvider{}
+					transactions := &fakeTransactions{}
+					service := oidcauth.NewService(provider, transactions, oidcauth.Options{
+						BasePath: "/reader", TransactionTTL: 5 * time.Minute, Now: func() time.Time { return now },
+					})
+					begin, err := service.Begin(context.Background(), oidcauth.BeginRequest{
+						Purpose: purpose, SessionUserID: "user-1", ReturnTo: "/reader/settings",
+					})
+					if err != nil {
+						t.Fatalf("Begin() error = %v", err)
+					}
+					if provider.purpose != purpose {
+						t.Fatalf("provider purpose = %q", provider.purpose)
+					}
+					provider.identity = oidcauth.VerifiedIdentity{
+						Issuer: provider.Issuer(), Subject: "subject", Nonce: provider.nonce, AuthTime: tt.authTime,
+					}
+					_, err = service.Complete(context.Background(), oidcauth.CallbackRequest{
+						State: provider.state, Code: "code", BindingToken: begin.BindingToken,
+					})
+					if tt.wantErr && !errors.Is(err, oidcauth.ErrInvalidIdentity) {
+						t.Fatalf("Complete() error = %v, want ErrInvalidIdentity", err)
+					}
+					if !tt.wantErr && err != nil {
+						t.Fatalf("Complete() error = %v", err)
+					}
+				})
 			}
 		})
 	}
@@ -263,6 +268,48 @@ func TestCompletePreservesSafeReturnTargetWhenProviderIsUnavailable(t *testing.T
 	}
 	if identity.ReturnTo != "/reader/settings?tab=account" || identity.Purpose != oidcauth.PurposeLogin {
 		t.Fatalf("Complete() lost validated transaction metadata: %+v", identity)
+	}
+}
+
+func TestCompleteRejectsOnlyProtocolConfigurationChanges(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		beginRevision       int64
+		completeRevision    int64
+		beginFingerprint    string
+		completeFingerprint string
+		wantChanged         bool
+	}{
+		{name: "protocol fingerprint changed", beginRevision: 1, completeRevision: 2, beginFingerprint: "old", completeFingerprint: "new", wantChanged: true},
+		{name: "policy-only revision changed", beginRevision: 1, completeRevision: 2, beginFingerprint: "same", completeFingerprint: "same", wantChanged: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &fakeProvider{}
+			transactions := &fakeTransactions{}
+			beginService := oidcauth.NewService(provider, transactions, oidcauth.Options{
+				BasePath: "/reader", ConfigRevision: tt.beginRevision, ConfigFingerprint: tt.beginFingerprint,
+			})
+			begin, err := beginService.Begin(context.Background(), oidcauth.BeginRequest{Purpose: oidcauth.PurposeLogin, ReturnTo: "/reader/"})
+			if err != nil {
+				t.Fatalf("Begin() error = %v", err)
+			}
+			provider.identity = oidcauth.VerifiedIdentity{Issuer: provider.Issuer(), Subject: "subject", Nonce: provider.nonce}
+			completeService := oidcauth.NewService(provider, transactions, oidcauth.Options{
+				BasePath: "/reader", ConfigRevision: tt.completeRevision, ConfigFingerprint: tt.completeFingerprint,
+			})
+			identity, err := completeService.Complete(context.Background(), oidcauth.CallbackRequest{
+				State: provider.state, Code: "code", BindingToken: begin.BindingToken,
+			})
+			if tt.wantChanged {
+				if !errors.Is(err, oidcauth.ErrConfigurationChanged) || provider.exchanges != 0 || identity.ReturnTo != "/reader/" {
+					t.Fatalf("Complete() = %+v, %v, exchanges=%d", identity, err, provider.exchanges)
+				}
+				return
+			}
+			if err != nil || provider.exchanges != 1 {
+				t.Fatalf("policy-only Complete() = %+v, %v, exchanges=%d", identity, err, provider.exchanges)
+			}
+		})
 	}
 }
 

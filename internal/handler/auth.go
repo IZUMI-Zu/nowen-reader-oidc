@@ -2,8 +2,10 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	oidcauth "github.com/nowen-reader/nowen-reader/internal/auth/oidc"
+	"github.com/nowen-reader/nowen-reader/internal/auth/oidcruntime"
 	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/model"
@@ -19,9 +22,7 @@ import (
 
 // AuthHandler handles all auth-related API endpoints.
 type AuthHandler struct {
-	oidcConfig config.OIDCConfig
-	oidc       oidcLoginService
-	oidcErr    error
+	oidc oidcRuntime
 }
 
 type oidcLoginService interface {
@@ -30,32 +31,59 @@ type oidcLoginService interface {
 	Cancel(ctx context.Context, request oidcauth.CancelRequest) (string, error)
 }
 
+type oidcRuntime interface {
+	oidcLoginService
+	State() oidcruntime.State
+	CompleteAndFinalize(ctx context.Context, request oidcauth.CallbackRequest, finalize oidcruntime.CompletionFinalizer) (oidcauth.AuthenticatedIdentity, error)
+	CompleteConfigTest(ctx context.Context, actorUserID, requestID string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error)
+	RecordAdminFailure(ctx context.Context, actorUserID, action, requestID, code string) error
+}
+
 const passwordLoginDisabledCode = "password_login_disabled"
 
 func NewAuthHandler() *AuthHandler {
-	cfg, err := config.GetOIDCConfig()
+	runtime, err := NewOIDCRuntime()
 	if err != nil {
-		if cfg.DisablePasswordLogin {
-			log.Printf("[Auth] OIDC configuration is invalid and password login remains disabled (fail-closed); correct the OIDC configuration or set OIDC_DISABLE_PASSWORD_LOGIN=false: %v", err)
-		} else {
-			log.Printf("[Auth] OIDC configuration is invalid; local authentication remains available: %v", err)
+		log.Printf("[Auth] OIDC runtime initialization failed; local authentication remains available: %v", err)
+		return newAuthHandlerWithOIDC(config.OIDCConfig{}, nil, err)
+	}
+	return newAuthHandlerWithRuntime(runtime)
+}
+
+// NewOIDCRuntime resolves exactly one configuration authority and builds the
+// process-wide hot-swappable OIDC runtime used by authentication and admin UI.
+func NewOIDCRuntime() (*oidcruntime.Manager, error) {
+	mode, modeErr := config.GetOIDCConfigMode()
+	forcePasswordLogin, forceErr := config.GetOIDCForcePasswordLogin()
+	if forceErr != nil {
+		log.Printf("[Auth] %v; forcing password login on for recovery", forceErr)
+	}
+
+	options := oidcruntime.Options{
+		Source:             oidcruntime.ConfigSourceDatabase,
+		Repository:         store.OIDCConfigStore{},
+		Safety:             store.OIDCConfigStore{},
+		Transactions:       store.OIDCTransactionStore{},
+		BasePath:           config.BasePath(),
+		ForcePasswordLogin: forcePasswordLogin,
+	}
+	if mode == config.OIDCConfigModeEnvironment || modeErr != nil {
+		environmentConfig, environmentErr := config.GetOIDCConfig()
+		options.Source = oidcruntime.ConfigSourceEnvironment
+		options.EnvironmentConfig = environmentConfig
+		options.EnvironmentError = errors.Join(modeErr, environmentErr)
+		if options.EnvironmentError != nil {
+			log.Printf("[Auth] environment-managed OIDC configuration is invalid: %v", options.EnvironmentError)
 		}
-		return newAuthHandlerWithOIDC(cfg, nil, err)
+	} else {
+		protector, protectorErr := oidcruntime.NewFileSecretProtector(config.DataDir(), os.Getenv("OIDC_CONFIG_KEY_FILE"))
+		if protectorErr != nil {
+			log.Printf("[Auth] Web-managed OIDC client secrets are unavailable: %v", protectorErr)
+		} else {
+			options.Protector = protector
+		}
 	}
-	if !cfg.Enabled {
-		return newAuthHandlerWithOIDC(cfg, nil, err)
-	}
-	provider, err := oidcauth.NewRemoteProvider(oidcauth.RemoteProviderConfig{
-		IssuerURL: cfg.IssuerURL, ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret,
-		RedirectURL: cfg.CallbackURL, Scopes: cfg.Scopes,
-	})
-	if err != nil {
-		return newAuthHandlerWithOIDC(cfg, nil, err)
-	}
-	service := oidcauth.NewService(provider, store.OIDCTransactionStore{}, oidcauth.Options{
-		BasePath: config.BasePath(), TransactionTTL: 5 * time.Minute,
-	})
-	return newAuthHandlerWithOIDC(cfg, service, nil)
+	return oidcruntime.NewManager(context.Background(), options)
 }
 
 // Register handles POST /api/auth/register
@@ -227,7 +255,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 func (h *AuthHandler) requirePasswordLoginEnabled(c *gin.Context) bool {
-	if !h.oidcConfig.DisablePasswordLogin {
+	if !h.oidc.State().Config.DisablePasswordLogin {
 		return true
 	}
 	c.JSON(http.StatusForbidden, gin.H{
@@ -338,9 +366,10 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	}
 
 	if hasUsers == 0 {
+		oidcConfig := h.oidc.State().Config
 		oidcStatus := h.oidcStatus()
 		bootstrapReady := h.oidcBootstrapReady()
-		passwordLoginEnabled := !h.oidcConfig.DisablePasswordLogin
+		passwordLoginEnabled := !oidcConfig.DisablePasswordLogin
 		registrationMode := "closed"
 		if passwordLoginEnabled && !bootstrapReady {
 			registrationMode = "open"
@@ -352,22 +381,23 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		return
 	}
 
+	oidcConfig := h.oidc.State().Config
 	user := middleware.GetCurrentUser(c)
 	if c.GetHeader("Authorization") != "" && user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 	oidcStatus := h.oidcStatus()
-	if user != nil && h.oidcConfig.Enabled {
-		if linked, err := store.HasOIDCIdentityForUser(c.Request.Context(), user.ID, h.oidcConfig.IssuerURL); err == nil {
+	if user != nil && oidcConfig.Enabled {
+		if linked, err := store.HasOIDCIdentityForUser(c.Request.Context(), user.ID, oidcConfig.IssuerURL); err == nil {
 			oidcStatus["linked"] = linked
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"user":             user,
 		"needsSetup":       false,
-		"registrationMode": passwordRegistrationMode(h.oidcConfig.DisablePasswordLogin),
-		"loginMethods":     gin.H{"password": !h.oidcConfig.DisablePasswordLogin, "oidc": oidcStatus},
+		"registrationMode": passwordRegistrationMode(oidcConfig.DisablePasswordLogin),
+		"loginMethods":     gin.H{"password": !oidcConfig.DisablePasswordLogin, "oidc": oidcStatus},
 	})
 }
 

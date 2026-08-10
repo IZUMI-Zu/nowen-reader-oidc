@@ -3,15 +3,18 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	oidcauth "github.com/nowen-reader/nowen-reader/internal/auth/oidc"
+	"github.com/nowen-reader/nowen-reader/internal/auth/oidcruntime"
 	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/model"
@@ -29,6 +32,41 @@ type fakeOIDCService struct {
 	cancelRequest  oidcauth.CancelRequest
 	cancelReturnTo string
 	cancelError    error
+}
+
+type fakeHandlerOIDCRuntime struct {
+	*fakeOIDCService
+	state            oidcruntime.State
+	verifiedUser     string
+	verifiedIdentity oidcauth.AuthenticatedIdentity
+	failureAudits    []string
+}
+
+func (r *fakeHandlerOIDCRuntime) RecordAdminFailure(_ context.Context, actorUserID, action, requestID, code string) error {
+	r.failureAudits = append(r.failureAudits, actorUserID+"|"+action+"|"+requestID+"|"+code)
+	return nil
+}
+
+func (r *fakeHandlerOIDCRuntime) State() oidcruntime.State { return r.state }
+
+func (r *fakeHandlerOIDCRuntime) CompleteAndFinalize(ctx context.Context, request oidcauth.CallbackRequest, finalize oidcruntime.CompletionFinalizer) (oidcauth.AuthenticatedIdentity, error) {
+	identity, err := r.Complete(ctx, request)
+	if err != nil || identity.Purpose == oidcauth.PurposeConfigTest {
+		return identity, err
+	}
+	if finalize == nil {
+		return identity, errors.New("OIDC completion finalizer is required")
+	}
+	if err := finalize(r.state, identity); err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
+func (r *fakeHandlerOIDCRuntime) CompleteConfigTest(_ context.Context, actorUserID, _ string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error) {
+	r.verifiedUser = actorUserID
+	r.verifiedIdentity = identity
+	return oidcruntime.AdminConfig{Status: "ready"}, nil
 }
 
 func (s *fakeOIDCService) Begin(_ context.Context, request oidcauth.BeginRequest) (oidcauth.AuthorizationRedirect, error) {
@@ -157,6 +195,118 @@ func TestOIDCCallbackProvisionsSeparateLocalUserAndIssuesBoundedSession(t *testi
 	}
 	if user.ID == "local-admin" || user.Username == "admin" || user.Password != "" || user.Role != "user" {
 		t.Fatalf("OIDC identity was merged into the local admin: %+v", user)
+	}
+}
+
+func TestOIDCConfigurationTestBindsCurrentAdministratorAndMarksDraftVerified(t *testing.T) {
+	t.Setenv("BASE_PATH", "/reader")
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-config-test.db")); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	t.Cleanup(store.CloseDB)
+	createLocalAdminForOIDCTest(t)
+	if err := store.CreateSession(&model.UserSession{
+		ID: "admin-config-session", UserID: "local-admin", ExpiresAt: time.Now().Add(time.Hour),
+		AuthMethod: model.SessionAuthMethodPassword, AuthenticatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	cfg := enabledOIDCHandlerConfig()
+	cfg.Enabled = false
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+			VerifiedIdentity: oidcauth.VerifiedIdentity{
+				Issuer: cfg.IssuerURL, Subject: "admin-oidc-subject", Nonce: "verified",
+			},
+			Purpose: oidcauth.PurposeConfigTest, SessionUserID: "local-admin", ReturnTo: "/reader/settings?tab=authentication",
+		}},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "admin-config-session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if runtime.verifiedUser != "local-admin" {
+		t.Fatalf("verified actor = %q", runtime.verifiedUser)
+	}
+	if runtime.verifiedIdentity.Subject != "admin-oidc-subject" || runtime.verifiedIdentity.Purpose != oidcauth.PurposeConfigTest {
+		t.Fatalf("verified identity = %+v", runtime.verifiedIdentity)
+	}
+}
+
+func TestOIDCConfigurationTestAuditsIdentityValidationFailure(t *testing.T) {
+	cfg := enabledOIDCHandlerConfig()
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{
+			completeResult: oidcauth.AuthenticatedIdentity{
+				Purpose: oidcauth.PurposeConfigTest, SessionUserID: "local-admin", ReturnTo: "/reader/settings?tab=authentication",
+			},
+			completeError: oidcauth.ErrInvalidIdentity,
+		},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true, Ready: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.Header.Set("X-Request-ID", "request-invalid-auth-time")
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?oidc_error=identity_validation_failed&tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if !reflect.DeepEqual(runtime.failureAudits, []string{"local-admin|verify|request-invalid-auth-time|identity_validation_failed"}) {
+		t.Fatalf("failure audits = %#v", runtime.failureAudits)
+	}
+}
+
+func TestOIDCConfigurationTestAuditsSessionMismatchBeforeVerificationCommit(t *testing.T) {
+	cfg := enabledOIDCHandlerConfig()
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+			VerifiedIdentity: oidcauth.VerifiedIdentity{Issuer: cfg.IssuerURL, Subject: "subject"},
+			Purpose:          oidcauth.PurposeConfigTest, SessionUserID: "local-admin", ReturnTo: "/reader/settings?tab=authentication",
+		}},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true, Ready: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.Header.Set("X-Request-ID", "request-session-mismatch")
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?oidc_error=session_mismatch&tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if !reflect.DeepEqual(runtime.failureAudits, []string{"local-admin|verify|request-session-mismatch|session_mismatch"}) {
+		t.Fatalf("failure audits = %#v", runtime.failureAudits)
+	}
+}
+
+func TestOIDCCallbackRejectsOrdinaryLoginAfterOIDCIsDisabled(t *testing.T) {
+	cfg := enabledOIDCHandlerConfig()
+	cfg.Enabled = false
+	service := &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+		VerifiedIdentity: oidcauth.VerifiedIdentity{Issuer: cfg.IssuerURL, Subject: "subject", Nonce: "verified"},
+		Purpose:          oidcauth.PurposeLogin, ReturnTo: "/reader/books",
+	}}
+	router := setupOIDCHandlerTest(t, cfg, service)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/books?oidc_error=configuration_disabled" {
+		t.Fatalf("disabled callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
 	}
 }
 

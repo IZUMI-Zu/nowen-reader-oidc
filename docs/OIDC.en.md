@@ -20,6 +20,47 @@ You need:
 
 Production deployments must use HTTPS. HTTP is accepted only when `PUBLIC_URL` uses `localhost`, `127.0.0.1`, or another loopback IP. The Provider issuer must always use HTTPS.
 
+## Recommended: Configure in the Web Admin
+
+New deployments that do not explicitly set `OIDC_ENABLED` use database-managed configuration by default. Create a local administrator first, then open **Settings → Single sign-on**:
+
+1. Enter the issuer, Client ID, Client Secret, public site URL, and scopes. Keep OIDC disabled and save the draft.
+2. Run the Discovery check. This validates only Discovery and endpoints; it does not prove that the Client Secret is correct.
+3. Run the real test login. NowenReader completes Authorization Code + PKCE and explicitly links the verified identity to the current administrator.
+4. Enable OIDC after the test succeeds. Keep password login available and validate both methods in a private browser window.
+5. Disable password login only after confirming the recovery path.
+
+Protocol-field changes invalidate the previous test and require another real test login. Saved configuration takes effect immediately without a restart.
+
+Disabling active OIDC requires the acting administrator to have a local recovery password. The page recounts users for the current issuer who have no local password and shows the exact impact; a non-zero count requires explicit confirmation. For emergency recovery, set `OIDC_FORCE_PASSWORD_LOGIN=true` in the deployment environment and restart the service.
+
+Database-managed Client Secrets are encrypted with AES-256-GCM. Prefer an independently mounted 32-byte key through `OIDC_CONFIG_KEY_FILE`. Without one, NowenReader creates `{DATA_DIR}/secrets/oidc-config.key` with mode `0600`. A local key on the same volume protects against disclosure of the SQLite file alone, not compromise of the whole volume or host. Back up the key securely with the database.
+
+Mount an external key in Docker Compose as follows:
+
+```bash
+openssl rand -out oidc-config.key 32
+chmod 600 oidc-config.key
+```
+
+```yaml
+services:
+  nowen-reader:
+    environment:
+      OIDC_CONFIG_KEY_FILE: /run/secrets/oidc_config_key
+    secrets:
+      - oidc_config_key
+secrets:
+  oidc_config_key:
+    file: ./oidc-config.key
+```
+
+Do not replace or lose this key before re-entering the Client Secret. Existing ciphertext then cannot be decrypted; OIDC remains unavailable and NowenReader does not overwrite it.
+
+Existing environment deployments remain compatible: when `OIDC_ENABLED` is explicitly set, `OIDC_CONFIG_MODE=auto` continues to use the complete environment configuration and the Web page is read-only. You may explicitly select `environment` or `database`; fields are never mixed across sources.
+
+For recovery, `OIDC_FORCE_PASSWORD_LOGIN=true` forces the password entry point open and overrides the Web setting. Set it and restart when the database-managed configuration is damaged or the Provider is unavailable.
+
 ## Example Assumptions
 
 | Item | Example Value |
@@ -43,7 +84,7 @@ PUBLIC_URL + BASE_PATH + /api/auth/oidc/callback
 
 The Provider Discovery document must expose HTTPS `authorization_endpoint`, `token_endpoint`, and `jwks_uri` values. ID Tokens must contain standard `iss`, `sub`, `aud`, and lifetime claims and must return the requested `nonce`.
 
-NowenReader verifies the signature, issuer, audience, `azp`, nonce, and `at_hash` when supplied by the Provider. `preferred_username`, `name`, `email`, and `email_verified` are profile hints only. The verified `(issuer, subject)` pair is the account identity; email and username never cause an automatic account merge.
+NowenReader verifies the signature, issuer, audience, `azp`, nonce, and `at_hash` when supplied by the Provider. Reauthentication and Web-admin test login use `max_age=0`, so OIDC Core also requires `auth_time`; missing, stale, or unexpectedly future values are rejected. `preferred_username`, `name`, `email`, and `email_verified` are profile hints only. The verified `(issuer, subject)` pair is the account identity; email and username never cause an automatic account merge.
 
 ## Authelia
 
@@ -122,6 +163,7 @@ Configure `docker-compose.yml`:
 services:
   nowen-reader:
     environment:
+      OIDC_CONFIG_MODE: 'environment'
       PUBLIC_URL: 'https://reader.example.com'
       BASE_PATH: '/reader'
       OIDC_ENABLED: 'true'
@@ -145,7 +187,7 @@ docker compose logs --tail=100 nowen-reader
 
 > **Important Note**
 >
-> This release accepts the client secret through an environment variable and does not implement a Docker secret file variable. Restrict access to `.env`, deployment configuration, and the Docker daemon because a principal able to inspect the container configuration may read the secret.
+> Environment-managed mode can read the client secret from a Docker/Kubernetes secret file through `OIDC_CLIENT_SECRET_FILE`; do not set it together with `OIDC_CLIENT_SECRET`. Restrict access to the mounted secret, container configuration, and Docker daemon because those privileges can still expose the credential.
 
 ## Options
 
@@ -273,6 +315,8 @@ An existing account starts linking from an authenticated browser session. The sa
 Unlinking requires password login to be enabled and the user to have a local password. It remains blocked while password login is disabled, even if stale identities from an older issuer remain in the database.
 
 ## Safely Disable Password Login
+
+In Web/database mode, the administrator must select the dedicated dangerous-action confirmation when saving; toggling the setting alone is rejected. Environment-managed deployments use the procedure below.
 
 Before changing the switch, confirm:
 

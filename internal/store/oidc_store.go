@@ -29,10 +29,11 @@ type OIDCTransactionStore struct{}
 
 func (OIDCTransactionStore) Create(ctx context.Context, transaction oidcauth.LoginTransaction) error {
 	_, err := db.ExecContext(ctx, `INSERT INTO "OIDCLoginTransaction"
-		("stateHash", "bindingHash", "nonce", "pkceVerifier", "purpose", "sessionUserId", "returnTo", "expiresAt", "createdAt")
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		("stateHash", "bindingHash", "nonce", "pkceVerifier", "purpose", "sessionUserId", "returnTo", "expiresAt", "createdAt", "configRevision", "configFingerprint")
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		transaction.StateHash, transaction.BindingHash, transaction.Nonce, transaction.PKCEVerifier,
 		string(transaction.Purpose), transaction.SessionUserID, transaction.ReturnTo, transaction.ExpiresAt, transaction.CreatedAt,
+		transaction.ConfigRevision, transaction.ConfigFingerprint,
 	)
 	return err
 }
@@ -40,14 +41,21 @@ func (OIDCTransactionStore) Create(ctx context.Context, transaction oidcauth.Log
 // LinkOIDCIdentity explicitly associates a verified external identity with a
 // caller-selected local user. It never resolves a target by email or username.
 func LinkOIDCIdentity(ctx context.Context, userID string, identity oidcauth.VerifiedIdentity) error {
-	if userID == "" || identity.Issuer == "" || identity.Subject == "" {
-		return oidcauth.ErrInvalidIdentity
-	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := linkOIDCIdentityTx(ctx, tx, userID, identity, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func linkOIDCIdentityTx(ctx context.Context, tx *sql.Tx, userID string, identity oidcauth.VerifiedIdentity, now time.Time) error {
+	if userID == "" || identity.Issuer == "" || identity.Subject == "" {
+		return oidcauth.ErrInvalidIdentity
+	}
 	var userExists int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM "User" WHERE "id" = ?`, userID).Scan(&userExists); err != nil {
 		return err
@@ -57,11 +65,10 @@ func LinkOIDCIdentity(ctx context.Context, userID string, identity oidcauth.Veri
 	}
 
 	var linkedUserID string
-	err = tx.QueryRowContext(ctx, `SELECT "userId" FROM "ExternalIdentity" WHERE "issuer" = ? AND "subject" = ?`, identity.Issuer, identity.Subject).Scan(&linkedUserID)
+	err := tx.QueryRowContext(ctx, `SELECT "userId" FROM "ExternalIdentity" WHERE "issuer" = ? AND "subject" = ?`, identity.Issuer, identity.Subject).Scan(&linkedUserID)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
-	now := time.Now().UTC()
 	if err == nil {
 		if linkedUserID != userID {
 			return ErrOIDCIdentityAlreadyLinked
@@ -73,7 +80,7 @@ func LinkOIDCIdentity(ctx context.Context, userID string, identity oidcauth.Veri
 		); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return nil
 	}
 
 	var providerIdentityCount int
@@ -91,7 +98,7 @@ func LinkOIDCIdentity(ctx context.Context, userID string, identity oidcauth.Veri
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func OIDCIdentityBelongsToUser(ctx context.Context, userID, issuer, subject string) (bool, error) {
@@ -162,10 +169,11 @@ func (OIDCTransactionStore) Consume(ctx context.Context, stateHash, bindingHash 
 	var transaction oidcauth.LoginTransaction
 	var purpose string
 	err = tx.QueryRowContext(ctx, `SELECT "stateHash", "bindingHash", "nonce", "pkceVerifier", "purpose",
-		"sessionUserId", "returnTo", "expiresAt", "createdAt"
+		"sessionUserId", "returnTo", "expiresAt", "createdAt", "configRevision", "configFingerprint"
 		FROM "OIDCLoginTransaction" WHERE "stateHash" = ?`, stateHash).Scan(
 		&transaction.StateHash, &transaction.BindingHash, &transaction.Nonce, &transaction.PKCEVerifier, &purpose,
 		&transaction.SessionUserID, &transaction.ReturnTo, &transaction.ExpiresAt, &transaction.CreatedAt,
+		&transaction.ConfigRevision, &transaction.ConfigFingerprint,
 	)
 	if err != nil {
 		return oidcauth.LoginTransaction{}, err

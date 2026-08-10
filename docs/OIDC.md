@@ -20,6 +20,47 @@ NowenReader 可以作为 OpenID Connect 1.0 Relying Party（RP），通过外部
 
 生产环境必须使用 HTTPS。只有 `PUBLIC_URL` 使用 `localhost`、`127.0.0.1` 或其他 loopback IP 时才允许 HTTP；Provider issuer 始终必须使用 HTTPS。
 
+## 推荐：在 Web 后台配置
+
+没有显式设置 `OIDC_ENABLED` 的新部署默认使用数据库托管模式。先用本地账号创建管理员，然后进入 **设置 → 统一登录**：
+
+1. 填写 issuer、Client ID、Client Secret、公开站点地址和 scopes，保持“启用 OIDC”关闭并保存草稿。
+2. 点击“检查 Discovery”。这只验证 Discovery 文档和端点，不代表 Client Secret 正确。
+3. 点击“进行真实测试登录”。NowenReader 会走完整 Authorization Code + PKCE 流程，并把验证后的身份明确绑定到当前管理员。
+4. 测试通过后启用 OIDC，先保留密码登录，并用隐身窗口验收双登录模式。
+5. 只有确认恢复路径后，才考虑关闭用户名密码登录。
+
+协议字段发生变化会使测试状态失效，必须重新完成真实测试登录。配置保存后立即生效，不需要重启服务。
+
+停用已启用的 OIDC 时，当前管理员必须拥有本地恢复密码。后台会重新统计当前 issuer 下没有本地密码的用户并显示准确数量；数量大于零时必须显式确认影响后才能保存。紧急情况下可在部署环境设置 `OIDC_FORCE_PASSWORD_LOGIN=true` 并重启服务。
+
+Web 托管的 Client Secret 使用 AES-256-GCM 加密。推荐通过 `OIDC_CONFIG_KEY_FILE` 挂载独立的 32-byte key；未设置时会在 `{DATA_DIR}/secrets/oidc-config.key` 创建 `0600` 本地 key。本地 key 与数据库位于同一数据卷时只防止 SQLite 单文件泄露，不能抵御整卷或主机权限泄露，备份时必须同时安全备份 key。
+
+Docker Compose 可这样挂载外部 key：
+
+```bash
+openssl rand -out oidc-config.key 32
+chmod 600 oidc-config.key
+```
+
+```yaml
+services:
+  nowen-reader:
+    environment:
+      OIDC_CONFIG_KEY_FILE: /run/secrets/oidc_config_key
+    secrets:
+      - oidc_config_key
+secrets:
+  oidc_config_key:
+    file: ./oidc-config.key
+```
+
+不要在尚未重新输入 Client Secret 前替换或丢失这个 key；否则现有 ciphertext 无法解密，OIDC 会保持不可用而不会覆盖密文。
+
+已有环境变量部署保持兼容：只要显式设置了 `OIDC_ENABLED`，`OIDC_CONFIG_MODE=auto` 就继续使用完整环境配置，Web 页面只读。也可以显式设置 `OIDC_CONFIG_MODE=environment` 或 `database`；两种来源绝不逐字段混合。
+
+部署侧恢复开关 `OIDC_FORCE_PASSWORD_LOGIN=true` 会强制重新开放密码入口，并覆盖 Web 中的关闭密码设置。配置损坏或 Provider 故障时，可设置该变量并重启后使用本地恢复密码登录。
+
 ## 示例假设
 
 本文示例使用以下值：
@@ -49,7 +90,7 @@ Provider 的 Discovery 文档必须至少提供以下 HTTPS endpoint：
 - `token_endpoint`
 - `jwks_uri`
 
-ID Token 必须包含标准的 `iss`、`sub`、`aud` 和有效时间声明，并返回请求中的 `nonce`。NowenReader 会验证签名、issuer、audience、`azp`、nonce，以及 Provider 返回时可用的 `at_hash`。
+ID Token 必须包含标准的 `iss`、`sub`、`aud` 和有效时间声明，并返回请求中的 `nonce`。NowenReader 会验证签名、issuer、audience、`azp`、nonce，以及 Provider 返回时可用的 `at_hash`。重新认证和后台测试登录使用 `max_age=0`，因此还要求符合 OIDC Core 的 `auth_time`，并拒绝缺失、过旧或异常未来时间。
 
 `preferred_username`、`name`、`email` 和 `email_verified` 只用于创建显示资料。账号唯一身份始终是经过验证的 `(issuer, subject)`；系统不会按 email 或 username 自动合并账号。
 
@@ -130,6 +171,7 @@ chmod 600 .env
 services:
   nowen-reader:
     environment:
+      OIDC_CONFIG_MODE: 'environment'
       PUBLIC_URL: 'https://reader.example.com'
       BASE_PATH: '/reader'
       OIDC_ENABLED: 'true'
@@ -153,7 +195,7 @@ docker compose logs --tail=100 nowen-reader
 
 > **重要说明**
 >
-> 当前版本只支持通过环境变量传入 client secret，没有 Docker secret file 变量。任何能读取容器配置或 Docker socket 的主体都可能看到该环境变量，应限制 `.env`、部署配置和 Docker daemon 的访问权限。
+> 环境托管模式可使用 `OIDC_CLIENT_SECRET_FILE` 从 Docker/Kubernetes secret 文件读取 client secret；不要同时设置 `OIDC_CLIENT_SECRET`。任何能读取挂载 secret、容器配置或 Docker socket 的主体仍可能取得凭据，应限制相应权限。
 
 ## 配置选项
 
@@ -281,6 +323,8 @@ OIDC_DISABLE_PASSWORD_LOGIN: 'false'
 解绑要求密码登录当前可用且该用户已经设置本地密码。关闭密码登录时无法解绑，即使数据库中残留其他旧 issuer 身份。
 
 ## 安全地关闭密码登录
+
+在 Web 数据库模式中，管理员必须在保存时单独勾选危险操作确认；仅打开开关不会生效。环境变量模式按下述部署流程操作。
 
 执行以下验收后再修改开关：
 

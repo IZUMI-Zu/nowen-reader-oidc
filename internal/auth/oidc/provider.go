@@ -41,8 +41,6 @@ type RemoteProvider struct {
 
 func NewRemoteProvider(config RemoteProviderConfig) (*RemoteProvider, error) {
 	config.IssuerURL = strings.TrimSpace(config.IssuerURL)
-	config.ClientID = strings.TrimSpace(config.ClientID)
-	config.ClientSecret = strings.TrimSpace(config.ClientSecret)
 	config.RedirectURL = strings.TrimSpace(config.RedirectURL)
 	if config.IssuerURL == "" || config.ClientID == "" || config.ClientSecret == "" || config.RedirectURL == "" {
 		return nil, errors.New("issuer, client ID, client secret, and redirect URL are required")
@@ -81,6 +79,16 @@ func (p *RemoteProvider) Issuer() string {
 	return p.config.IssuerURL
 }
 
+// Probe performs Discovery and endpoint validation without starting a browser
+// authorization transaction. It cannot validate the client secret because
+// confidential-client authentication occurs later at the token endpoint.
+func (p *RemoteProvider) Probe(ctx context.Context) error {
+	ctx, cancel := p.requestContext(ctx)
+	defer cancel()
+	_, _, err := p.ensure(ctx)
+	return err
+}
+
 func (p *RemoteProvider) AuthorizationURL(ctx context.Context, request AuthorizationRequest) (string, error) {
 	ctx, cancel := p.requestContext(ctx)
 	defer cancel()
@@ -92,7 +100,7 @@ func (p *RemoteProvider) AuthorizationURL(ctx context.Context, request Authoriza
 		coreoidc.Nonce(request.Nonce),
 		oauth2.S256ChallengeOption(request.CodeVerifier),
 	}
-	if request.Purpose == PurposeReauth {
+	if request.Purpose == PurposeReauth || request.Purpose == PurposeConfigTest {
 		options = append(options,
 			oauth2.SetAuthURLParam("prompt", "login"),
 			oauth2.SetAuthURLParam("max_age", "0"),
@@ -178,14 +186,15 @@ func (t providerStatusTransport) RoundTrip(request *http.Request) (*http.Respons
 	if err != nil {
 		return nil, err
 	}
-	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError {
+	if response.StatusCode >= http.StatusBadRequest {
 		_ = response.Body.Close()
-		return nil, providerHTTPStatusError{status: response.Status}
+		return nil, providerHTTPStatusError{code: response.StatusCode, status: response.Status}
 	}
 	return response, nil
 }
 
 type providerHTTPStatusError struct {
+	code   int
 	status string
 }
 
@@ -195,7 +204,8 @@ func providerUnavailable(err error) bool {
 	var statusError providerHTTPStatusError
 	var networkError net.Error
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
-		errors.As(err, &statusError) || errors.As(err, &networkError)
+		(errors.As(err, &statusError) && (statusError.code == http.StatusTooManyRequests || statusError.code >= http.StatusInternalServerError)) ||
+		errors.As(err, &networkError)
 }
 
 func (p *RemoteProvider) ensure(ctx context.Context) (*oauth2.Config, *coreoidc.IDTokenVerifier, error) {

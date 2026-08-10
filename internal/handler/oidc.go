@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	oidcauth "github.com/nowen-reader/nowen-reader/internal/auth/oidc"
+	"github.com/nowen-reader/nowen-reader/internal/auth/oidcruntime"
 	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/model"
@@ -18,30 +21,94 @@ import (
 
 const OIDCTransactionCookie = "nowen_oidc_tx"
 
+type staticOIDCRuntime struct {
+	state   oidcruntime.State
+	service oidcLoginService
+}
+
 func newAuthHandlerWithOIDC(cfg config.OIDCConfig, service oidcLoginService, err error) *AuthHandler {
-	return &AuthHandler{oidcConfig: cfg, oidc: service, oidcErr: err}
+	state := oidcruntime.State{
+		Config: cfg, Source: oidcruntime.ConfigSourceEnvironment,
+		Available: service != nil && err == nil, Ready: cfg.Enabled && service != nil && err == nil,
+	}
+	if err != nil {
+		state.ErrorCode = "configuration_invalid"
+	}
+	return newAuthHandlerWithRuntime(&staticOIDCRuntime{state: state, service: service})
+}
+
+func newAuthHandlerWithRuntime(runtime oidcRuntime) *AuthHandler {
+	return &AuthHandler{oidc: runtime}
+}
+
+func (r *staticOIDCRuntime) State() oidcruntime.State { return r.state }
+
+func (r *staticOIDCRuntime) Begin(ctx context.Context, request oidcauth.BeginRequest) (oidcauth.AuthorizationRedirect, error) {
+	if r.service == nil {
+		return oidcauth.AuthorizationRedirect{}, oidcauth.ErrProviderUnavailable
+	}
+	return r.service.Begin(ctx, request)
+}
+
+func (r *staticOIDCRuntime) Complete(ctx context.Context, request oidcauth.CallbackRequest) (oidcauth.AuthenticatedIdentity, error) {
+	if r.service == nil {
+		return oidcauth.AuthenticatedIdentity{}, oidcauth.ErrProviderUnavailable
+	}
+	return r.service.Complete(ctx, request)
+}
+
+func (r *staticOIDCRuntime) CompleteAndFinalize(ctx context.Context, request oidcauth.CallbackRequest, finalize oidcruntime.CompletionFinalizer) (oidcauth.AuthenticatedIdentity, error) {
+	identity, err := r.Complete(ctx, request)
+	if err != nil || identity.Purpose == oidcauth.PurposeConfigTest {
+		return identity, err
+	}
+	if finalize == nil {
+		return identity, errors.New("OIDC completion finalizer is required")
+	}
+	if err := finalize(r.State(), identity); err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
+func (r *staticOIDCRuntime) Cancel(ctx context.Context, request oidcauth.CancelRequest) (string, error) {
+	if r.service == nil {
+		return "", oidcauth.ErrProviderUnavailable
+	}
+	return r.service.Cancel(ctx, request)
+}
+
+func (r *staticOIDCRuntime) CompleteConfigTest(context.Context, string, string, oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error) {
+	return oidcruntime.AdminConfig{}, oidcruntime.ErrEnvironmentManaged
+}
+
+func (r *staticOIDCRuntime) RecordAdminFailure(context.Context, string, string, string, string) error {
+	return nil
 }
 
 func (h *AuthHandler) oidcStatus() gin.H {
+	state := h.oidc.State()
 	return gin.H{
-		"enabled":     h.oidcConfig.Enabled && h.oidc != nil && h.oidcErr == nil,
-		"displayName": h.oidcConfig.ProviderName,
+		"enabled":     state.Config.Enabled && state.Ready,
+		"displayName": state.Config.ProviderName,
 	}
 }
 
 func (h *AuthHandler) oidcBootstrapReady() bool {
-	return h.oidcConfig.Enabled && h.oidc != nil && h.oidcErr == nil &&
-		h.oidcConfig.AutoProvision && len(h.oidcConfig.BootstrapAdminSubjects) > 0
+	state := h.oidc.State()
+	return state.Config.Enabled && state.Ready && state.Config.AutoProvision &&
+		len(state.Config.BootstrapAdminSubjects) > 0
 }
 
 // OIDCLogin starts a backend-managed Authorization Code + PKCE flow.
 func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	if !h.oidcConfig.Enabled {
+	state := h.oidc.State()
+	if !state.Config.Enabled {
 		c.JSON(http.StatusNotFound, gin.H{"error": "OIDC login is not enabled"})
 		return
 	}
-	if h.oidcErr != nil || h.oidc == nil {
+	if !state.Ready {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC login is temporarily unavailable"})
 		return
 	}
@@ -74,11 +141,12 @@ func (h *AuthHandler) OIDCReauth(c *gin.Context) {
 
 func (h *AuthHandler) beginOIDCForCurrentUser(c *gin.Context, purpose oidcauth.Purpose) {
 	c.Header("Cache-Control", "no-store")
-	if !h.oidcConfig.Enabled {
+	state := h.oidc.State()
+	if !state.Config.Enabled {
 		c.JSON(http.StatusNotFound, gin.H{"error": "OIDC login is not enabled"})
 		return
 	}
-	if h.oidcErr != nil || h.oidc == nil {
+	if !state.Ready {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC login is temporarily unavailable"})
 		return
 	}
@@ -107,12 +175,13 @@ func (h *AuthHandler) beginOIDCForCurrentUser(c *gin.Context, purpose oidcauth.P
 // the verified external identity into a bounded local session.
 func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	if !h.oidcConfig.Enabled {
-		c.JSON(http.StatusNotFound, gin.H{"error": "OIDC login is not enabled"})
-		return
-	}
-	if h.oidcErr != nil || h.oidc == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC login is temporarily unavailable"})
+	state := h.oidc.State()
+	if !state.Available {
+		if !state.Config.Enabled {
+			c.JSON(http.StatusNotFound, gin.H{"error": "OIDC login is not enabled"})
+		} else {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC login is temporarily unavailable"})
+		}
 		return
 	}
 	binding, err := c.Cookie(OIDCTransactionCookie)
@@ -137,78 +206,134 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OIDC callback"})
 		return
 	}
-	identity, err := h.oidc.Complete(c.Request.Context(), oidcauth.CallbackRequest{
+	identity, err := h.oidc.CompleteAndFinalize(c.Request.Context(), oidcauth.CallbackRequest{
 		State: c.Query("state"), Code: c.Query("code"), BindingToken: binding,
+	}, func(state oidcruntime.State, identity oidcauth.AuthenticatedIdentity) error {
+		if code := h.finalizeOIDCCallback(c, state, identity); code != "" {
+			return &oidcCallbackFinalizationError{code: code}
+		}
+		return nil
 	})
 	if err != nil {
+		if identity.Purpose == oidcauth.PurposeConfigTest {
+			h.recordOIDCConfigTestFailure(c, identity.SessionUserID, callbackFailureAuditCode(err))
+		}
+		var finalizationError *oidcCallbackFinalizationError
 		switch {
+		case errors.As(err, &finalizationError):
+			redirectOIDCFailure(c, identity.ReturnTo, finalizationError.code)
 		case errors.Is(err, oidcauth.ErrInvalidTransaction):
 			c.JSON(http.StatusBadRequest, gin.H{"error": "OIDC login transaction is invalid or expired"})
 		case errors.Is(err, oidcauth.ErrInvalidIdentity):
 			redirectOIDCFailure(c, identity.ReturnTo, "identity_validation_failed")
 		case errors.Is(err, oidcauth.ErrProviderUnavailable):
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC provider is unavailable"})
+		case errors.Is(err, oidcauth.ErrConfigurationChanged):
+			redirectOIDCFailure(c, identity.ReturnTo, "oidc_configuration_changed")
 		default:
 			redirectOIDCFailure(c, identity.ReturnTo, "login_failed")
 		}
 		return
 	}
+	if identity.Purpose == oidcauth.PurposeConfigTest {
+		user, _, ok := currentTransactionSession(c, identity.SessionUserID)
+		if !ok || user.Role != "admin" {
+			h.recordOIDCConfigTestFailure(c, identity.SessionUserID, "session_mismatch")
+			redirectOIDCFailure(c, identity.ReturnTo, "session_mismatch")
+			return
+		}
+		if _, err := h.oidc.CompleteConfigTest(c.Request.Context(), user.ID, c.GetHeader("X-Request-ID"), identity); err != nil {
+			if errors.Is(err, oidcauth.ErrConfigurationChanged) || errors.Is(err, oidcruntime.ErrConfigConflict) {
+				redirectOIDCFailure(c, identity.ReturnTo, "oidc_configuration_changed")
+				return
+			}
+			redirectOIDCFailure(c, identity.ReturnTo, "configuration_test_failed")
+			return
+		}
+	}
+	c.Redirect(http.StatusSeeOther, identity.ReturnTo)
+}
+
+func (h *AuthHandler) recordOIDCConfigTestFailure(c *gin.Context, actorUserID, code string) {
+	if err := h.oidc.RecordAdminFailure(c.Request.Context(), actorUserID, "verify", c.GetHeader("X-Request-ID"), code); err != nil {
+		log.Printf("[Auth] could not persist OIDC configuration-test failure audit")
+	}
+}
+
+func callbackFailureAuditCode(err error) string {
+	switch {
+	case errors.Is(err, oidcauth.ErrInvalidIdentity):
+		return "identity_validation_failed"
+	case errors.Is(err, oidcauth.ErrProviderUnavailable):
+		return "provider_unavailable"
+	case errors.Is(err, oidcauth.ErrConfigurationChanged):
+		return "oidc_configuration_changed"
+	default:
+		return "configuration_test_failed"
+	}
+}
+
+type oidcCallbackFinalizationError struct {
+	code string
+}
+
+func (e *oidcCallbackFinalizationError) Error() string {
+	return "OIDC callback finalization failed: " + e.code
+}
+
+// finalizeOIDCCallback runs while the runtime holds the configuration read
+// lease. Apply therefore cannot disable or replace the provider between token
+// validation and these local identity/session side effects.
+func (h *AuthHandler) finalizeOIDCCallback(c *gin.Context, state oidcruntime.State, identity oidcauth.AuthenticatedIdentity) string {
+	if !state.Config.Enabled || !state.Ready {
+		return "configuration_disabled"
+	}
+	oidcConfig := state.Config
 	switch identity.Purpose {
 	case oidcauth.PurposeLogin:
 		user, _, err := store.ResolveOIDCLogin(c.Request.Context(), identity.VerifiedIdentity, store.OIDCProvisionPolicy{
-			AutoProvision:  h.oidcConfig.AutoProvision,
-			BootstrapAdmin: h.oidcConfig.IsBootstrapAdmin(identity.Subject),
+			AutoProvision:  oidcConfig.AutoProvision,
+			BootstrapAdmin: oidcConfig.IsBootstrapAdmin(identity.Subject),
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrOIDCIdentityNotLinked) || errors.Is(err, store.ErrOIDCBootstrapDenied) {
-				redirectOIDCFailure(c, identity.ReturnTo, "account_not_authorized")
-				return
+				return "account_not_authorized"
 			}
-			redirectOIDCFailure(c, identity.ReturnTo, "login_failed")
-			return
+			return "login_failed"
 		}
-		if err := h.issueSession(c, user.ID, model.SessionAuthMethodOIDC, h.oidcConfig.SessionAbsoluteTTL, h.oidcConfig.SecureCookies); err != nil {
-			redirectOIDCFailure(c, identity.ReturnTo, "login_failed")
-			return
+		if err := h.issueSession(c, user.ID, model.SessionAuthMethodOIDC, oidcConfig.SessionAbsoluteTTL, oidcConfig.SecureCookies); err != nil {
+			return "login_failed"
 		}
 	case oidcauth.PurposeLink:
 		user, _, ok := currentTransactionSession(c, identity.SessionUserID)
 		if !ok {
-			redirectOIDCFailure(c, identity.ReturnTo, "session_mismatch")
-			return
+			return "session_mismatch"
 		}
 		if err := store.LinkOIDCIdentity(c.Request.Context(), user.ID, identity.VerifiedIdentity); err != nil {
 			if errors.Is(err, store.ErrOIDCIdentityAlreadyLinked) || errors.Is(err, store.ErrOIDCProviderAlreadyLinked) {
-				redirectOIDCFailure(c, identity.ReturnTo, "identity_already_linked")
-				return
+				return "identity_already_linked"
 			}
-			redirectOIDCFailure(c, identity.ReturnTo, "link_failed")
-			return
+			return "link_failed"
 		}
 	case oidcauth.PurposeReauth:
 		user, credential, ok := currentTransactionSession(c, identity.SessionUserID)
 		if !ok {
-			redirectOIDCFailure(c, identity.ReturnTo, "session_mismatch")
-			return
+			return "session_mismatch"
 		}
 		belongs, err := store.OIDCIdentityBelongsToUser(c.Request.Context(), user.ID, identity.Issuer, identity.Subject)
 		if err != nil {
-			redirectOIDCFailure(c, identity.ReturnTo, "reauth_failed")
-			return
+			return "reauth_failed"
 		}
 		if !belongs {
-			redirectOIDCFailure(c, identity.ReturnTo, "identity_mismatch")
-			return
+			return "identity_mismatch"
 		}
 		if err := store.MarkSessionAuthenticated(credential.ID, time.Now().UTC()); err != nil {
-			redirectOIDCFailure(c, identity.ReturnTo, "reauth_failed")
-			return
+			return "reauth_failed"
 		}
 	default:
-		redirectOIDCFailure(c, identity.ReturnTo, "login_failed")
-		return
+		return "login_failed"
 	}
-	c.Redirect(http.StatusSeeOther, identity.ReturnTo)
+	return ""
 }
 
 // OIDCUnlink removes the configured provider only when another login method
@@ -219,10 +344,11 @@ func (h *AuthHandler) OIDCUnlink(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Browser session required"})
 		return
 	}
-	if err := store.UnlinkOIDCIdentity(c.Request.Context(), user.ID, h.oidcConfig.IssuerURL, !h.oidcConfig.DisablePasswordLogin); err != nil {
+	oidcConfig := h.oidc.State().Config
+	if err := store.UnlinkOIDCIdentity(c.Request.Context(), user.ID, oidcConfig.IssuerURL, !oidcConfig.DisablePasswordLogin); err != nil {
 		if errors.Is(err, store.ErrOIDCWouldLockOut) {
 			message := "Set a local password before unlinking the last external login"
-			if h.oidcConfig.DisablePasswordLogin {
+			if oidcConfig.DisablePasswordLogin {
 				message = "Enable password login before unlinking the last external login"
 			}
 			c.JSON(http.StatusConflict, gin.H{"error": message})
@@ -289,7 +415,7 @@ func (h *AuthHandler) setOIDCTransactionCookie(c *gin.Context, value string, exp
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name: OIDCTransactionCookie, Value: value, Path: config.JoinBasePath("/api/auth/oidc"),
-		MaxAge: maxAge, Expires: expiresAt, HttpOnly: true, Secure: h.oidcConfig.SecureCookies,
+		MaxAge: maxAge, Expires: expiresAt, HttpOnly: true, Secure: h.oidc.State().Config.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -297,7 +423,7 @@ func (h *AuthHandler) setOIDCTransactionCookie(c *gin.Context, value string, exp
 func (h *AuthHandler) clearOIDCTransactionCookie(c *gin.Context) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name: OIDCTransactionCookie, Value: "", Path: config.JoinBasePath("/api/auth/oidc"),
-		MaxAge: -1, Expires: time.Unix(1, 0), HttpOnly: true, Secure: h.oidcConfig.SecureCookies,
+		MaxAge: -1, Expires: time.Unix(1, 0), HttpOnly: true, Secure: h.oidc.State().Config.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

@@ -503,6 +503,8 @@ const en: Translations = {
       mangadex: "MangaDex",
       mangaupdates: "MangaUpdates",
       kitsu: "Kitsu",
+		ehentai: "E-Hentai / ExHentai",
+		exhentai: "ExHentai",
       googlebooks: "Google Books",
       comicinfo: "ComicInfo (Local)",
       epub_opf: "EPUB OPF (Local)",

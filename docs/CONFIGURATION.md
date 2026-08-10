@@ -21,6 +21,14 @@
 | `OIDC_AUTO_PROVISION` | `false` | 是否为未知 `(issuer, subject)` 自动创建本地普通用户 |
 | `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` | — | 可成为首个管理员的精确 OIDC subject，逗号分隔；推荐留空并先创建本地管理员 |
 | `OIDC_SESSION_MAX_AGE` | `12h` | OIDC 本地 Session 不可续期突破的绝对时限，范围 `5m`–`720h` |
+| `EHENTAI_ENABLED` | `false` | 显式启用可选的 E-Hentai / ExHentai 元数据源 |
+| `EHENTAI_SITE` | `ehentai` | 元数据搜索站点：`ehentai` 或 `exhentai` |
+| `EHENTAI_IPB_MEMBER_ID` | — | 可选账号 Cookie；ExHentai 必填，必须与 pass hash 成对配置 |
+| `EHENTAI_IPB_PASS_HASH` | — | 可选账号 Cookie；仅从环境读取，禁止提交到 Git |
+| `EHENTAI_STAR` | — | 可选 `star` Cookie |
+| `EHENTAI_IGNEOUS` | — | 可选 `igneous` Cookie |
+| `EHENTAI_PREFER_ORIGINAL_TITLE` | `false` | 优先使用 gallery 原始标题 |
+| `EHENTAI_SEARCH_EXPUNGED` | `false` | 标题搜索时包含 expunged galleries |
 | `DATABASE_URL` | `./data/nowen-reader.db` | SQLite 数据库文件路径 |
 | `COMICS_DIR` | `./comics` | 漫画主目录 |
 | `NOVELS_DIR` | `./novels` | 电子书主目录 |
@@ -87,6 +95,10 @@ environment:
 推荐先用本地首次设置创建 break-glass 管理员，再从账户设置显式绑定 OIDC。若必须直接用 OIDC 创建首个管理员，需要同时启用 `OIDC_AUTO_PROVISION=true`，并在 `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` 中填写该 Provider 的精确 `sub`；启用这套安全 bootstrap 后，本地首次管理员注册会关闭，未命中 allowlist 的首个登录也会被拒绝。如需改回本地首次设置，应先关闭 OIDC bootstrap 配置。系统只用已验证的 `(issuer, subject)` 识别账号，不会按 email 或 username 自动合并。
 
 只有在真实 OIDC 登录和管理员身份绑定已经验收后，才应设置 `OIDC_DISABLE_PASSWORD_LOGIN=true`。它会同时关闭 `/api/auth/login`、自助注册和 Web 密码表单，但不会删除本地密码、已有 Session 或 API Key；Session 内的密码 reauth 仍可用于敏感操作。关闭密码登录时不能解除最后一个 OIDC 身份。Provider 故障时将无法创建新登录，恢复方法是把该变量改回 `false` 并重启服务。若 OIDC 配置本身无效，关闭请求仍然保持生效，避免密码入口因配置错误意外重新开放。
+
+## E-Hentai / ExHentai 元数据
+
+完整的公开 EH、登录 EX、Cookie 安全、字段映射、限流和故障排查说明见 [E-Hentai / ExHentai 元数据插件](./EHENTAI.md)。该来源默认关闭且不会自动选中，只提供元数据，不下载画廊内容。
 
 ## 站点设置
 
@@ -208,5 +220,6 @@ environment:
 
 - 📦 [安装指南](./INSTALL.md)
 - 🔐 [OpenID Connect 配置](./OIDC.md)
+- 🔞 [E-Hentai / ExHentai 元数据插件](./EHENTAI.md)
 - 📚 [常见问题](./FAQ.md)
 - 🛠️ [开发指南](./DEVELOPMENT.md)

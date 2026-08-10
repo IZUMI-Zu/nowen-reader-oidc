@@ -48,7 +48,7 @@ NowenReader is a self-hosted manga / novel management and reading platform optim
 ## ✨ Features
 
 - **📚 Content Management** — Multi-format, auto-scan, tags & categories, group merging, favorites & ratings, user-level reading status (want/reading/finished), reading status filter, metadata editing, file upload, batch operations, duplicate detection, invalid cleanup
-- **🔍 Metadata Scraping** — AniList / Bangumi / MangaDex / MangaUpdates / Kitsu; ComicInfo.xml & novel metadata extraction
+- **🔍 Metadata Scraping** — AniList / Bangumi / MangaDex / MangaUpdates / Kitsu, plus an optional E-Hentai / ExHentai metadata source; ComicInfo.xml & novel metadata extraction
 - **🤖 AI Assistance (optional)** — Semantic search, smart summary, tag/category suggestions, cover analysis, filename parsing, reading insights, AI chat, chapter summary, page translation, etc.
 - **📖 Reading Experience** — Single/double-page, webtoon mode, image filters & presets, webtoon double-tap zoom, comic bookmarks, novel chapters, PDF rendering, continue reading, reading stats & goals, data export
 - **📡 Protocol Integration** — OPDS support (KOReader / Moon+ Reader, etc.)
@@ -84,6 +84,7 @@ To deploy at `https://example.com/reader/`, set `BASE_PATH=/reader` and configur
 | [Installation Guide](./docs/INSTALL.en.md) | 5 deployment methods: Docker Hub, NAS, source build, binary, Docker Compose |
 | [Configuration](./docs/CONFIGURATION.en.md) | Environment variables, site settings, AI config, scanner parameters, supported formats |
 | [OpenID Connect Configuration](./docs/OIDC.en.md) | Provider registration, account linking, password-login switch, recovery, and troubleshooting |
+| [E-Hentai / ExHentai Plugin](./docs/EHENTAI.en.md) | Optional metadata source, cookie security, rate limits, mapping, and troubleshooting |
 | [API Reference](./docs/API.md) | Full RESTful API documentation |
 | [Development Guide](./docs/DEVELOPMENT.md) | Prerequisites, project structure, Makefile, tech stack, CI/CD |
 | [FAQ](./docs/FAQ.md) | Common questions about deployment, permissions, thumbnails, PDF, AI, OPDS |

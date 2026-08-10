@@ -1969,6 +1969,7 @@ export default function ScraperPage() {
                     { id: "mangadex", name: "MangaDex", icon: "📖" },
                     { id: "mangaupdates", name: "MangaUpdates", icon: "📋" },
                     { id: "kitsu", name: "Kitsu", icon: "🦊" },
+					{ id: "ehentai", name: "E-Hentai / ExHentai", icon: "🔞" },
                   ].map((src) => (
                     <button
                       key={src.id}

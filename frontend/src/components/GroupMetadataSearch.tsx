@@ -38,6 +38,7 @@ const COMIC_SOURCES = [
   { id: "mangadex", name: "MangaDex", icon: "📖" },
   { id: "mangaupdates", name: "MangaUpdates", icon: "📋" },
   { id: "kitsu", name: "Kitsu", icon: "🦊" },
+	{ id: "ehentai", name: "E-Hentai / ExHentai", icon: "🔞" },
 ] as const;
 
 // 小说数据源
@@ -47,7 +48,8 @@ const NOVEL_SOURCES = [
   { id: "anilist_novel", name: "AniList", icon: "🅰" },
 ] as const;
 
-const DEFAULT_COMIC_SOURCES = COMIC_SOURCES.map((s) => s.id);
+// EH/EX is always opt-in so ordinary and automatic searches never contact it.
+const DEFAULT_COMIC_SOURCES = COMIC_SOURCES.filter((s) => s.id !== "ehentai").map((s) => s.id);
 const DEFAULT_NOVEL_SOURCES = NOVEL_SOURCES.map((s) => s.id);
 
 const SOURCE_COLORS: Record<string, string> = {
@@ -58,6 +60,8 @@ const SOURCE_COLORS: Record<string, string> = {
   mangadex: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
   mangaupdates: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
   kitsu: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+	ehentai: "bg-red-500/15 text-red-600 dark:text-red-400",
+	exhentai: "bg-red-700/15 text-red-700 dark:text-red-300",
   googlebooks: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
 };
 

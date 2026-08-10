@@ -4,6 +4,11 @@ import (
 	"strings"
 )
 
+var (
+	defaultComicMetadataSources = []string{"anilist", "bangumi", "mangadex", "mangaupdates", "kitsu"}
+	defaultNovelMetadataSources = []string{"googlebooks", "anilist_novel", "bangumi_novel"}
+)
+
 // ============================================================
 // Unified search (parallel)
 // ============================================================
@@ -19,11 +24,11 @@ func SearchMetadata(query string, sources []string, lang string, contentType ...
 	if len(sources) == 0 {
 		switch ct {
 		case "novel":
-			sources = []string{"googlebooks", "anilist_novel", "bangumi_novel"}
+			sources = append([]string(nil), defaultNovelMetadataSources...)
 		case "comic":
-			sources = []string{"anilist", "bangumi", "mangadex", "mangaupdates", "kitsu"}
+			sources = append([]string(nil), defaultComicMetadataSources...)
 		default:
-			sources = []string{"anilist", "bangumi", "mangadex", "mangaupdates", "kitsu"}
+			sources = append([]string(nil), defaultComicMetadataSources...)
 		}
 	}
 
@@ -77,6 +82,8 @@ func doSearch(query string, sources []string, lang string) []ComicMetadata {
 				ch <- result{SearchKitsu(query, lang)}
 			case "googlebooks":
 				ch <- result{SearchGoogleBooks(query, lang)}
+			case "ehentai":
+				ch <- result{SearchEHentai(query, lang)}
 			default:
 				ch <- result{}
 			}

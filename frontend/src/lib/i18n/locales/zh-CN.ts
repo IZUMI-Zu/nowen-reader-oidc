@@ -500,6 +500,8 @@ const zhCN = {
       mangadex: "MangaDex (漫画索引)",
       mangaupdates: "MangaUpdates (漫画更新)",
       kitsu: "Kitsu (狐狸)",
+		ehentai: "E-Hentai / ExHentai",
+		exhentai: "ExHentai",
       googlebooks: "Google Books (谷歌图书)",
       comicinfo: "ComicInfo (本地)",
       epub_opf: "EPUB OPF (本地)",
@@ -1810,6 +1812,8 @@ export interface Translations {
       mangadex: string;
       mangaupdates: string;
       kitsu: string;
+		ehentai: string;
+		exhentai: string;
       googlebooks: string;
       comicinfo: string;
       epub_opf: string;

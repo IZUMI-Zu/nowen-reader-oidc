@@ -610,6 +610,28 @@ type GroupMetadataUpdate struct {
 
 // UpdateGroupMetadata 更新系列的元数据字段。
 func UpdateGroupMetadata(groupID int, update GroupMetadataUpdate) error {
+	return updateGroupMetadata(db, groupID, update)
+}
+
+// UpdateGroupMetadataAndTags commits the denormalized metadata fields and the
+// normalized group tag associations together, so the UI cannot observe a new
+// Genre with an old ComicGroupTag set (or the reverse).
+func UpdateGroupMetadataAndTags(groupID int, update GroupMetadataUpdate, tagNames []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateGroupMetadata(tx, groupID, update); err != nil {
+		return err
+	}
+	if err := setGroupTags(tx, groupID, tagNames); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateGroupMetadata(database tagDatabase, groupID int, update GroupMetadataUpdate) error {
 	var setClauses []string
 	var args []interface{}
 
@@ -678,7 +700,7 @@ func UpdateGroupMetadata(groupID int, update GroupMetadataUpdate) error {
 	args = append(args, time.Now().UTC())
 	args = append(args, groupID)
 
-	_, err := db.Exec(`UPDATE "ComicGroup" SET `+strings.Join(setClauses, ", ")+` WHERE "id" = ?`, args...)
+	_, err := database.Exec(`UPDATE "ComicGroup" SET `+strings.Join(setClauses, ", ")+` WHERE "id" = ?`, args...)
 	return err
 }
 

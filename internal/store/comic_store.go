@@ -407,13 +407,40 @@ type TagWithCount struct {
 	Count int    `json:"count"`
 }
 
-// GetAllTags 返回所有标签及其漫画计数。
+// GetAllTags 返回所有标签及其在漫画、合集和目录作品上的关联计数。
 func GetAllTags() ([]TagWithCount, error) {
+	usageTables := []struct {
+		table string
+		alias string
+	}{
+		{table: "ComicTag", alias: "ct"},
+		{table: "ComicGroupTag", alias: "cgt"},
+		{table: "ComicSeriesTag", alias: "cst"},
+	}
+	countParts := make([]string, 0, len(usageTables))
+	for _, usage := range usageTables {
+		var exists bool
+		if err := db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = ?
+			)
+		`, usage.table).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if exists {
+			countParts = append(countParts, fmt.Sprintf(
+				`(SELECT COUNT(*) FROM "%s" %s WHERE %s."tagId" = t."id")`,
+				usage.table, usage.alias, usage.alias,
+			))
+		}
+	}
+	countExpr := "0"
+	if len(countParts) > 0 {
+		countExpr = strings.Join(countParts, " + ")
+	}
 	rows, err := db.Query(`
-		SELECT t."id", t."name", t."color", COUNT(ct."comicId") as cnt
+		SELECT t."id", t."name", t."color", ` + countExpr + ` AS cnt
 		FROM "Tag" t
-		LEFT JOIN "ComicTag" ct ON ct."tagId" = t."id"
-		GROUP BY t."id"
 		ORDER BY t."name" ASC
 	`)
 	if err != nil {
@@ -470,7 +497,6 @@ func AddTagsToComicReplacingMatching(comicID string, tagNames []string, shouldRe
 		return err
 	}
 	defer tx.Rollback()
-
 	var removedTagIDs []int
 	if shouldReplace != nil {
 		rows, err := tx.Query(`
@@ -525,20 +551,162 @@ func AddTagsToComicReplacingMatching(comicID string, tagNames []string, shouldRe
 	}
 
 	for _, tagID := range removedTagIDs {
-		if _, err := tx.Exec(`DELETE FROM "Tag" WHERE "id" = ? AND NOT EXISTS (SELECT 1 FROM "ComicTag" WHERE "tagId" = ?)`, tagID, tagID); err != nil {
+		if err := deleteTagIfUnreferenced(tx, tagID); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func ehentaiTagReplacementMatcher(tagNames []string) func(string) bool {
-	for _, name := range tagNames {
-		if IsEHentaiGallerySourceTag(name) {
-			return IsEHentaiGallerySourceTag
+type tagDatabase interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func deleteTagsIfUnreferenced(database tagDatabase, tagIDs []int) error {
+	seen := make(map[int]struct{}, len(tagIDs))
+	for _, tagID := range tagIDs {
+		if _, ok := seen[tagID]; ok {
+			continue
+		}
+		seen[tagID] = struct{}{}
+		if err := deleteTagIfUnreferenced(database, tagID); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+type genreTagOwner struct {
+	joinTable   string
+	ownerColumn string
+	entityTable string
+	idColumn    string
+}
+
+var genreTagOwners = []genreTagOwner{
+	{joinTable: "ComicTag", ownerColumn: "comicId", entityTable: "Comic", idColumn: "id"},
+	{joinTable: "ComicGroupTag", ownerColumn: "groupId", entityTable: "ComicGroup", idColumn: "id"},
+	{joinTable: "ComicSeriesTag", ownerColumn: "seriesId", entityTable: "ComicSeries", idColumn: "id"},
+}
+
+// rewriteGenreTagForOwners keeps the denormalized Genre fields aligned with
+// the normalized tag rows when the global tag manager renames or deletes a
+// tag. Only entities that actually own oldTag through a join table are touched.
+func rewriteGenreTagForOwners(database tagDatabase, oldTag, newTag string) error {
+	for _, owner := range genreTagOwners {
+		var tableExists bool
+		if err := database.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = ?
+			)
+		`, owner.joinTable).Scan(&tableExists); err != nil {
+			return err
+		}
+		if !tableExists {
+			continue
+		}
+		query := fmt.Sprintf(`
+			SELECT j."%s", COALESCE(e."genre", '')
+			FROM "%s" j
+			JOIN "%s" e ON e."%s" = j."%s"
+			JOIN "Tag" t ON t."id" = j."tagId"
+			WHERE t."name" = ?
+		`, owner.ownerColumn, owner.joinTable, owner.entityTable, owner.idColumn, owner.ownerColumn)
+		rows, err := database.Query(query, oldTag)
+		if err != nil {
+			return err
+		}
+		type genreUpdate struct {
+			id    any
+			genre string
+		}
+		var updates []genreUpdate
+		for rows.Next() {
+			var id any
+			var genre string
+			if err := rows.Scan(&id, &genre); err != nil {
+				rows.Close()
+				return err
+			}
+			if rewritten, changed := rewriteGenreTagValue(genre, oldTag, newTag); changed {
+				updates = append(updates, genreUpdate{id: id, genre: rewritten})
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		updateQuery := fmt.Sprintf(`UPDATE "%s" SET "genre" = ? WHERE "%s" = ?`, owner.entityTable, owner.idColumn)
+		for _, update := range updates {
+			if _, err := database.Exec(updateQuery, update.genre, update.id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func rewriteGenreTagValue(genre, oldTag, newTag string) (string, bool) {
+	parts := strings.Split(genre, ",")
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	changed := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.EqualFold(part, oldTag) {
+			part = strings.TrimSpace(newTag)
+			changed = true
+		}
+		if part == "" {
+			continue
+		}
+		key := strings.ToLower(part)
+		if _, ok := seen[key]; ok {
+			if changed {
+				continue
+			}
+		}
+		seen[key] = struct{}{}
+		result = append(result, part)
+	}
+	if !changed {
+		return genre, false
+	}
+	return strings.Join(result, ", "), true
+}
+
+// deleteTagIfUnreferenced removes a global tag only after checking every join
+// table that owns it. Looking at ComicTag alone would trigger ON DELETE CASCADE
+// and silently erase the same tag from groups or directory series.
+func deleteTagIfUnreferenced(database tagDatabase, tagID int) error {
+	for _, table := range []string{"ComicTag", "ComicGroupTag", "ComicSeriesTag"} {
+		var tableExists bool
+		if err := database.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = ?
+			)
+		`, table).Scan(&tableExists); err != nil {
+			return err
+		}
+		if !tableExists {
+			continue
+		}
+		var referenced bool
+		query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM "%s" WHERE "tagId" = ?)`, table)
+		if err := database.QueryRow(query, tagID).Scan(&referenced); err != nil {
+			return err
+		}
+		if referenced {
+			return nil
+		}
+	}
+	_, err := database.Exec(`DELETE FROM "Tag" WHERE "id" = ?`, tagID)
+	return err
 }
 
 // IsEHentaiGallerySourceTag reports whether tag is exactly an E-Hentai or
@@ -581,8 +749,13 @@ func IsEHentaiGallerySourceTag(tag string) bool {
 
 // RemoveTagFromComic 从漫画移除标签，清理孤立标签。
 func RemoveTagFromComic(comicID string, tagName string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var tagID int
-	err := db.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, tagName).Scan(&tagID)
+	err = tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, tagName).Scan(&tagID)
 	if err == sql.ErrNoRows {
 		return nil // tag doesn't exist
 	}
@@ -590,24 +763,25 @@ func RemoveTagFromComic(comicID string, tagName string) error {
 		return err
 	}
 
-	_, err = db.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ? AND "tagId" = ?`, comicID, tagID)
+	_, err = tx.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ? AND "tagId" = ?`, comicID, tagID)
 	if err != nil {
 		return err
 	}
-
-	// Clean up orphan tag
-	var count int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM "ComicTag" WHERE "tagId" = ?`, tagID).Scan(&count)
-	if count == 0 {
-		_, _ = db.Exec(`DELETE FROM "Tag" WHERE "id" = ?`, tagID)
+	if err := deleteTagIfUnreferenced(tx, tagID); err != nil {
+		return err
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ClearAllTagsFromComic 一次性清除漫画的所有标签，并清理孤立标签。
 func ClearAllTagsFromComic(comicID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	// 先获取该漫画关联的所有 tagId
-	rows, err := db.Query(`SELECT "tagId" FROM "ComicTag" WHERE "comicId" = ?`, comicID)
+	rows, err := tx.Query(`SELECT "tagId" FROM "ComicTag" WHERE "comicId" = ?`, comicID)
 	if err != nil {
 		return err
 	}
@@ -620,27 +794,100 @@ func ClearAllTagsFromComic(comicID string) error {
 		}
 		tagIDs = append(tagIDs, id)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 
 	if len(tagIDs) == 0 {
-		return nil
+		return tx.Commit()
 	}
 
 	// 批量删除关联记录
-	_, err = db.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ?`, comicID)
+	_, err = tx.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ?`, comicID)
 	if err != nil {
 		return err
 	}
 
-	// 清理孤立标签（没有被任何漫画引用的标签）
-	for _, tagID := range tagIDs {
-		var count int
-		_ = db.QueryRow(`SELECT COUNT(*) FROM "ComicTag" WHERE "tagId" = ?`, tagID).Scan(&count)
-		if count == 0 {
-			_, _ = db.Exec(`DELETE FROM "Tag" WHERE "id" = ?`, tagID)
+	// 清理没有被漫画、合集或目录作品引用的全局标签。
+	if err := deleteTagsIfUnreferenced(tx, tagIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReplaceAllTagsOnComicPreservingMatching atomically replaces every comic tag
+// except names accepted by preserve. It is used by destructive group override
+// so an insertion failure cannot leave a member with no tags or no gallery ID.
+func ReplaceAllTagsOnComicPreservingMatching(comicID string, tagNames []string, preserve func(string) bool) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`
+		SELECT t."id", t."name"
+		FROM "ComicTag" ct
+		JOIN "Tag" t ON t."id" = ct."tagId"
+		WHERE ct."comicId" = ?
+	`, comicID)
+	if err != nil {
+		return err
+	}
+	var previousTagIDs []int
+	finalNames := append([]string(nil), tagNames...)
+	for rows.Next() {
+		var tagID int
+		var name string
+		if err := rows.Scan(&tagID, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		previousTagIDs = append(previousTagIDs, tagID)
+		if preserve != nil && preserve(name) {
+			finalNames = append(finalNames, name)
 		}
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ?`, comicID); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(finalNames))
+	for _, rawName := range finalNames {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, err := tx.Exec(`INSERT INTO "Tag" ("name") VALUES (?) ON CONFLICT("name") DO NOTHING`, name); err != nil {
+			return err
+		}
+		var tagID int
+		if err := tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO "ComicTag" ("comicId", "tagId") VALUES (?, ?) ON CONFLICT DO NOTHING`, comicID, tagID); err != nil {
+			return err
+		}
+	}
+	if err := deleteTagsIfUnreferenced(tx, previousTagIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateTagColor 更新标签颜色，标签不存在时自动创建。
@@ -649,43 +896,110 @@ func UpdateTagColor(tagName, color string) error {
 	return err
 }
 
-// DeleteTag 删除标签及其所有关联（从所有漫画移除此标签）。
+// DeleteTag 删除标签及其在漫画、合集和目录作品上的所有关联。
 func DeleteTag(tagName string) error {
-	var tagID int
-	err := db.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, tagName).Scan(&tagID)
+	tx, err := db.Begin()
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var tagID int
+	err = tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, tagName).Scan(&tagID)
+	if err == sql.ErrNoRows {
 		return nil // tag doesn't exist
 	}
-	_, _ = db.Exec(`DELETE FROM "ComicTag" WHERE "tagId" = ?`, tagID)
-	_, err = db.Exec(`DELETE FROM "Tag" WHERE "id" = ?`, tagID)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := rewriteGenreTagForOwners(tx, tagName, ""); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM "Tag" WHERE "id" = ?`, tagID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RenameTag 重命名标签，目标标签已存在时自动合并。
 func RenameTag(oldName, newName string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	// Check if target tag exists
 	var existingID int
-	err := db.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, newName).Scan(&existingID)
+	err = tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, newName).Scan(&existingID)
 
 	var oldID int
-	err2 := db.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, oldName).Scan(&oldID)
-	if err2 != nil {
+	err2 := tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, oldName).Scan(&oldID)
+	if err2 == sql.ErrNoRows {
 		return nil // old tag doesn't exist
+	}
+	if err2 != nil {
+		return err2
 	}
 
 	if err == sql.ErrNoRows {
 		// Simple rename
-		_, err = db.Exec(`UPDATE "Tag" SET "name" = ? WHERE "id" = ?`, newName, oldID)
+		if err := rewriteGenreTagForOwners(tx, oldName, newName); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`UPDATE "Tag" SET "name" = ? WHERE "id" = ?`, newName, oldID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if existingID == oldID {
+		return tx.Commit()
+	}
+	if err := rewriteGenreTagForOwners(tx, oldName, newName); err != nil {
 		return err
 	}
 
-	// Target exists: merge
-	_, _ = db.Exec(`
-		UPDATE OR IGNORE "ComicTag" SET "tagId" = ? WHERE "tagId" = ?
-	`, existingID, oldID)
-	_, _ = db.Exec(`DELETE FROM "ComicTag" WHERE "tagId" = ?`, oldID)
-	_, _ = db.Exec(`DELETE FROM "Tag" WHERE "id" = ?`, oldID)
-	return nil
+	// Target exists: merge every ownership table before deleting the old
+	// global tag. Otherwise ON DELETE CASCADE would silently discard group or
+	// directory-series tags that are not represented in ComicTag.
+	owners := []struct {
+		table       string
+		ownerColumn string
+	}{
+		{table: "ComicTag", ownerColumn: "comicId"},
+		{table: "ComicGroupTag", ownerColumn: "groupId"},
+		{table: "ComicSeriesTag", ownerColumn: "seriesId"},
+	}
+	for _, owner := range owners {
+		var tableExists bool
+		if err := tx.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = ?
+			)
+		`, owner.table).Scan(&tableExists); err != nil {
+			return err
+		}
+		if !tableExists {
+			continue
+		}
+		insertQuery := fmt.Sprintf(`
+			INSERT OR IGNORE INTO "%s" ("%s", "tagId")
+			SELECT "%s", ? FROM "%s" WHERE "tagId" = ?
+		`, owner.table, owner.ownerColumn, owner.ownerColumn, owner.table)
+		if _, err := tx.Exec(insertQuery, existingID, oldID); err != nil {
+			return err
+		}
+		deleteQuery := fmt.Sprintf(`DELETE FROM "%s" WHERE "tagId" = ?`, owner.table)
+		if _, err := tx.Exec(deleteQuery, oldID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM "Tag" WHERE "id" = ?`, oldID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ============================================================

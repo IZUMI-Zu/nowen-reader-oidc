@@ -60,12 +60,14 @@ func TestApplySeriesScrapedMetadata(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
+	parentGenre := "artist:first artist, female:first tag, source:https://e-hentai.org/g/31/cccccccccc"
+	memberGenre := "artist:first artist, female:first tag"
 
 	response := performAuthedRequest(router, http.MethodPost, "/api/series/series-scrape/apply-metadata", map[string]interface{}{
 		"metadata": map[string]interface{}{
 			"author":      "Test Author",
 			"description": "Test Description",
-			"genre":       "Adventure,Fantasy",
+			"genre":       parentGenre,
 			"publisher":   "Test Publisher",
 			"language":    "zh",
 			"year":        2026,
@@ -97,7 +99,7 @@ func TestApplySeriesScrapedMetadata(t *testing.T) {
 	}
 	if detail.Series.Author != "Test Author" || detail.Series.Description != "Test Description" ||
 		detail.Series.Publisher != "Test Publisher" || detail.Series.Year == nil || *detail.Series.Year != 2026 ||
-		len(detail.Series.Tags) != 2 {
+		detail.Series.Genre != parentGenre || len(detail.Series.Tags) != 3 {
 		t.Fatalf("unexpected series metadata: %#v", detail.Series)
 	}
 	if detail.Series.ContentType != "comic" || detectSeriesContentType(detail) != "comic" {
@@ -132,9 +134,43 @@ func TestApplySeriesScrapedMetadata(t *testing.T) {
 		if err != nil || comic == nil {
 			t.Fatalf("load comic %s: %v", comicID, err)
 		}
-		if comic.Author != "Test Author" || comic.Description != "Test Description" || comic.Year == nil || *comic.Year != 2026 {
+		if comic.Author != "Test Author" || comic.Description != "Test Description" || comic.Year == nil || *comic.Year != 2026 || comic.Genre != memberGenre {
 			t.Fatalf("metadata not synced to %s: %#v", comicID, comic)
 		}
+		gotTags := make(map[string]bool, len(comic.Tags))
+		for _, tag := range comic.Tags {
+			gotTags[tag.Name] = true
+		}
+		if !reflect.DeepEqual(gotTags, map[string]bool{"artist:first artist": true, "female:first tag": true}) {
+			t.Fatalf("member %s tags = %#v", comicID, gotTags)
+		}
+	}
+
+	failedGenre := "artist:must fail atomically"
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER "fail_handler_series_tag"
+		BEFORE INSERT ON "ComicSeriesTag"
+		WHEN (SELECT "name" FROM "Tag" WHERE "id" = NEW."tagId") = 'artist:must fail atomically'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced handler series tag failure');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	response = performAuthedRequest(router, http.MethodPost, "/api/series/series-scrape/apply-metadata", map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"genre":  failedGenre,
+			"source": "test",
+		},
+		"fields":    []string{"genre", "tags"},
+		"overwrite": true,
+	}, cookie)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("atomic failure status = %d, body = %s", response.Code, response.Body.String())
+	}
+	afterFailure, err := store.GetSeriesDetail("series-scrape", "")
+	if err != nil || afterFailure == nil || afterFailure.Series.Genre != parentGenre || len(afterFailure.Series.Tags) != 3 {
+		t.Fatalf("series changed despite atomic failure: %#v, err=%v", afterFailure, err)
 	}
 
 	manager := &model.User{ID: "series-manager", Username: "series-manager", Password: "hash", Role: "user"}

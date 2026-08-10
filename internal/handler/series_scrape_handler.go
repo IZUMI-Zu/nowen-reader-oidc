@@ -141,24 +141,43 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 		metadataLocked := true
 		update.MetadataLocked = &metadataLocked
 	}
-	if err := store.UpdateSeriesMetadata(detail.Series.ID, update); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用目录作品元数据失败"})
-		return
-	}
-
+	var mergedTags []string
+	applyTags := false
 	if meta.Genre != "" && shouldApply("tags") {
-		existing, _ := store.GetSeriesTags(detail.Series.ID)
+		existing, err := store.GetSeriesTags(detail.Series.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取目录作品标签失败"})
+			return
+		}
 		names := make([]string, 0, len(existing))
 		for _, tag := range existing {
 			names = append(names, tag.Name)
 		}
-		names = mergeMetadataTags(names, splitAndTrim(meta.Genre))
-		if err := store.SetSeriesTags(detail.Series.ID, names); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "保存目录作品标签失败"})
-			return
+		incoming := splitAndTrim(meta.Genre)
+		if len(incoming) > 0 {
+			mergedTags = mergeMetadataTags(names, incoming)
+			applyTags = true
 		}
-		if body.SyncTags {
-			_, _, _, _ = store.SyncSeriesTagsToItems(detail.Series.ID)
+	}
+	var updateErr error
+	if applyTags {
+		updateErr = store.UpdateSeriesMetadataAndTags(detail.Series.ID, update, mergedTags)
+	} else {
+		updateErr = store.UpdateSeriesMetadata(detail.Series.ID, update)
+	}
+	if updateErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用目录作品元数据失败"})
+		return
+	}
+	if applyTags && body.SyncTags {
+		total, synced, _, err := store.SyncSeriesTagsToItems(detail.Series.ID)
+		if err != nil || synced != total {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "目录作品标签已保存，但同步成员标签失败",
+				"syncSuccess": synced,
+				"syncErrors":  total - synced,
+			})
+			return
 		}
 	}
 	if meta.CoverURL != "" && shouldApply("cover") {
@@ -172,7 +191,15 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "目录作品阅读单元加载失败"})
 			return
 		}
-		syncSuccess, syncErrors, _ = syncMetadataToComicIDs(ids, meta, fields, body.Overwrite, body.SyncRating)
+		syncSuccess, syncErrors, err = syncMetadataToComicIDs(ids, meta, fields, body.Overwrite, body.SyncRating)
+		if err != nil || syncErrors > 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "目录作品元数据已保存，但同步成员字段失败",
+				"syncSuccess": syncSuccess,
+				"syncErrors":  syncErrors,
+			})
+			return
+		}
 	}
 	updated, err := store.GetSeriesDetail(detail.Series.ID, getUserID(c))
 	if err != nil || updated == nil {

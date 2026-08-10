@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -311,27 +312,45 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 				update.ExternalRatingUpdatedAt = &now
 			}
 
-			if err := store.UpdateGroupMetadata(gid, update); err != nil {
-				result.Error = "应用元数据失败: " + err.Error()
-				result.Success = false
-				results = append(results, result)
-				continue
-			}
-
-			// 处理标签
+			var mergedTags []string
+			applyTags := false
 			if bestMatch.Genre != "" && shouldApply("tags") {
 				genres := splitAndTrim(bestMatch.Genre)
 				if len(genres) > 0 {
-					existingTags, _ := store.GetGroupTags(gid)
+					existingTags, err := store.GetGroupTags(gid)
+					if err != nil {
+						result.Error = "读取现有标签失败: " + err.Error()
+						result.Success = false
+						results = append(results, result)
+						continue
+					}
 					existingNames := make([]string, 0, len(existingTags))
 					for _, t := range existingTags {
 						existingNames = append(existingNames, t.Name)
 					}
-					allNames := mergeMetadataTags(existingNames, genres)
-					_ = store.SetGroupTags(gid, allNames)
-					if body.SyncTags && allowMemberSync {
-						_, _, _, _ = store.SyncGroupTagsToVolumes(gid)
-					}
+					mergedTags = mergeMetadataTags(existingNames, genres)
+					applyTags = true
+				}
+			}
+			var updateErr error
+			if applyTags {
+				updateErr = store.UpdateGroupMetadataAndTags(gid, update, mergedTags)
+			} else {
+				updateErr = store.UpdateGroupMetadata(gid, update)
+			}
+			if updateErr != nil {
+				result.Error = "应用元数据失败: " + updateErr.Error()
+				result.Success = false
+				results = append(results, result)
+				continue
+			}
+			if applyTags && body.SyncTags && allowMemberSync {
+				total, synced, _, err := store.SyncGroupTagsToVolumes(gid)
+				if err != nil || synced != total {
+					result.Error = fmt.Sprintf("合集标签已保存，但同步成员标签失败 (%d/%d)", synced, total)
+					result.Success = false
+					results = append(results, result)
+					continue
 				}
 			}
 
@@ -343,11 +362,13 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 			// 同步到所有卷
 			if body.SyncToVolumes && allowMemberSync {
 				successCount, errorCount, err := syncGroupMetadataToVolumes(gid, bestMatch, fieldsSet, body.Overwrite, shouldApply("rating"))
-				if err != nil {
-					log.Printf("[API] BatchScrape: syncToVolumes error for group %d: %v", gid, err)
-				} else {
-					log.Printf("[API] BatchScrape: synced to %d volumes (%d errors) for group %d", successCount, errorCount, gid)
+				if err != nil || errorCount > 0 {
+					result.Error = fmt.Sprintf("合集元数据已保存，但同步成员字段失败 (%d success, %d errors): %v", successCount, errorCount, err)
+					result.Success = false
+					results = append(results, result)
+					continue
 				}
+				log.Printf("[API] BatchScrape: synced to %d volumes (%d errors) for group %d", successCount, errorCount, gid)
 			}
 
 			result.Applied = true

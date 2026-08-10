@@ -1311,7 +1311,7 @@ const en: Translations = {
     edit: "Edit",
     merge: "Merge",
     mergeTitle: "Merge Tags",
-    mergeDesc: "Merge selected tags into one. All comics will use the target tag name.",
+    mergeDesc: "Merge selected tags into one. All comics, collections, and directory series will use the target tag name.",
     mergeTargetLabel: "Target tag name",
     selected: "Selected",
     tags: "tags",
@@ -1342,7 +1342,7 @@ const en: Translations = {
     refreshed: "Refreshed",
     refresh: "Refresh",
     // Batch delete feedback
-    batchDeleteWarning: "This will remove these tags from all comics. This action cannot be undone.",
+    batchDeleteWarning: "This will remove these tags from all comics, collections, and directory series. This action cannot be undone.",
     confirmBatchDeleteTags: "Confirm delete selected",
     batchDeleteDone: "Deleted",
     batchDeletePartial: "Delete completed",

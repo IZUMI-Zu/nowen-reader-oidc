@@ -111,6 +111,63 @@ func TestGroupScrapeDoesNotSyncIntoDirectorySeries(t *testing.T) {
 	}
 }
 
+func TestGroupScrapeReportsAtomicTagFailure(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	originalConfig := config.GetSiteConfig()
+	enabled := true
+	siteConfig := originalConfig
+	siteConfig.ScraperEnabled = &enabled
+	if err := config.SaveSiteConfig(&siteConfig); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = config.SaveSiteConfig(&originalConfig) })
+
+	router := setupTestRouter(t)
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	cookie := registerAndLogin(t, router)
+	groupID, err := store.CreateGroup("Atomic scrape group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldGenre := "artist:old handler value"
+	newGenre := "artist:new handler value"
+	if err := store.UpdateGroupMetadataAndTags(int(groupID), store.GroupMetadataUpdate{Genre: &oldGenre}, []string{oldGenre}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER "fail_handler_group_tag"
+		BEFORE INSERT ON "ComicGroupTag"
+		WHEN (SELECT "name" FROM "Tag" WHERE "id" = NEW."tagId") = 'artist:new handler value'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced handler group tag failure');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	response := performAuthedRequest(router, http.MethodPost, "/api/groups/"+strconv.FormatInt(groupID, 10)+"/apply-metadata", map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"genre":  newGenre,
+			"source": "test",
+		},
+		"fields":    []string{"genre", "tags"},
+		"overwrite": true,
+	}, cookie)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("apply failure status = %d, body = %s", response.Code, response.Body.String())
+	}
+	group, err := store.GetGroupByID(int(groupID))
+	if err != nil || group == nil || group.Genre != oldGenre {
+		t.Fatalf("group Genre changed despite failed tags: %#v, err=%v", group, err)
+	}
+	tags, err := store.GetGroupTags(int(groupID))
+	if err != nil || len(tags) != 1 || tags[0].Name != oldGenre {
+		t.Fatalf("group tags after failed apply = %#v, err=%v", tags, err)
+	}
+}
+
 func TestFirstGroupRecognitionComicUsesDirectorySeriesMember(t *testing.T) {
 	group := &store.ComicGroupDetail{
 		SeriesList: []store.GroupSeriesItem{

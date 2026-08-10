@@ -200,14 +200,31 @@ func TestEHentaiProviderSearchUsesOnlyLocalFixtureServer(t *testing.T) {
 	if got.Title != "[Yatsuki Hiyori] Choro Sugi! & More [Digital]" {
 		t.Fatalf("Title = %q", got.Title)
 	}
-	if got.Author != "yatsuki hiyori" || got.Publisher != "fixture circle" || got.Language != "en" {
+	if got.Author != "yatsuki hiyori, second artist" || got.Publisher != "fixture circle, second circle" || got.Language != "en" {
 		t.Fatalf("unexpected mapped identity fields: %+v", got)
 	}
 	if got.Year == nil || *got.Year != 2021 {
 		t.Fatalf("Year = %v", got.Year)
 	}
-	if !strings.Contains(got.Genre, "category:manga") || !strings.Contains(got.Genre, "source:https://e-hentai.org/g/1866546/2e521d4407") {
-		t.Fatalf("Genre = %q", got.Genre)
+	wantTags := strings.Join([]string{
+		"artist:yatsuki hiyori",
+		"artist:second artist",
+		"group:fixture circle",
+		"group:second circle",
+		"language:english",
+		"language:translated",
+		"female:example tag",
+		"female:second tag",
+		"male:example male tag",
+		"parody:fixture work",
+		"character:fixture heroine",
+		"other:full color",
+		"tankoubon",
+		"category:manga",
+		"source:https://e-hentai.org/g/1866546/2e521d4407",
+	}, ", ")
+	if got.Genre != wantTags {
+		t.Fatalf("Genre tags\n got: %q\nwant: %q", got.Genre, wantTags)
 	}
 	if got.ExternalRating == nil || *got.ExternalRating != 4.74 || got.ExternalRatingMax == nil || *got.ExternalRatingMax != 5 {
 		t.Fatalf("rating = %v/%v", got.ExternalRating, got.ExternalRatingMax)
@@ -328,6 +345,14 @@ func TestEHentaiProviderClassifiesFailuresWithoutResponseContent(t *testing.T) {
 }
 
 func TestSearchEHentaiDisabledDoesNotUseNetwork(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	var networkAttempts atomic.Int32
+	http.DefaultTransport = ehRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		networkAttempts.Add(1)
+		return nil, fmt.Errorf("disabled-source test rejected network request to %s", req.URL.Host)
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
 	t.Setenv("DATA_DIR", t.TempDir())
 	if err := config.SaveSiteConfig(&config.SiteConfig{}); err != nil {
 		t.Fatal(err)
@@ -340,6 +365,9 @@ func TestSearchEHentaiDisabledDoesNotUseNetwork(t *testing.T) {
 	}
 	if results := SearchEHentai("must not leave the process", "en"); len(results) != 0 {
 		t.Fatalf("disabled search returned %+v", results)
+	}
+	if got := networkAttempts.Load(); got != 0 {
+		t.Fatalf("disabled source attempted %d network requests", got)
 	}
 }
 
@@ -481,13 +509,30 @@ func TestApplyEHentaiMetadataReplacesStaleGallerySourceTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldSource := "source:http://e-hentai.org/g/1/0123456789"
-	if err := store.AddTagsToComic("eh-source-replace", []string{oldSource, "artist:fixture"}); err != nil {
+	otherProviderSource := "source:https://metadata.example/items/42"
+	if err := store.AddTagsToComic("eh-source-replace", []string{
+		oldSource,
+		otherProviderSource,
+		"artist:existing",
+		"user:favorite",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	newSource := "source:https://exhentai.org/g/2/abcdef0123"
+	incomingTags := []string{
+		"artist:updated",
+		"artist:second artist",
+		"female:first tag",
+		"female:second tag",
+		"male:example tag",
+		"parody:fixture work",
+		"language:english",
+		"category:manga",
+		newSource,
+	}
 	if _, err := ApplyMetadata("eh-source-replace", ComicMetadata{
 		Title:  "Updated",
-		Genre:  "artist:updated, " + newSource,
+		Genre:  strings.Join(incomingTags, ", "),
 		Source: config.EHentaiSiteRestricted,
 	}, "en", true); err != nil {
 		t.Fatal(err)
@@ -496,14 +541,21 @@ func TestApplyEHentaiMetadataReplacesStaleGallerySourceTag(t *testing.T) {
 	if err != nil || comic == nil {
 		t.Fatalf("GetComicByID() error = %v", err)
 	}
-	var sources []string
+	gotTags := make(map[string]bool, len(comic.Tags))
 	for _, tag := range comic.Tags {
-		if IsEHentaiGallerySourceTag(tag.Name) {
-			sources = append(sources, tag.Name)
+		gotTags[tag.Name] = true
+	}
+	wantAll := append([]string{otherProviderSource, "artist:existing", "user:favorite"}, incomingTags...)
+	if len(gotTags) != len(wantAll) {
+		t.Fatalf("persisted tag count = %d, want %d: %#v", len(gotTags), len(wantAll), gotTags)
+	}
+	for _, tag := range wantAll {
+		if !gotTags[tag] {
+			t.Fatalf("persisted tags missing %q: %#v", tag, gotTags)
 		}
 	}
-	if len(sources) != 1 || sources[0] != newSource {
-		t.Fatalf("EH source tags = %#v, want only %q", sources, newSource)
+	if gotTags[oldSource] {
+		t.Fatalf("stale EH source tag remained: %#v", gotTags)
 	}
 }
 

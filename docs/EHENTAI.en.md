@@ -172,6 +172,8 @@ chmod 600 .env
 
 The plugin also adds a `source:https://.../g/{gid}/{token}` tag to preserve the exact source. Applying another EH/EX gallery replaces the previous EH/EX `source:` tag so later lookups cannot keep resolving to stale gallery data. Covers are accepted only from official EH HTTPS image hosts.
 
+When group or directory-series tags are synchronized to member comics, content tags such as `artist:*`, `female:*`, `male:*`, and `parody:*` are copied, but the parent EH/EX `source:` is not. Each comic keeps its own exact gallery identity so a later direct lookup cannot resolve to the parent or another volume.
+
 ## Rate limiting and network security
 
 [EHWiki's search documentation](https://ehwiki.org/wiki/searches) requires at least three seconds between gallery searches; the plugin uses a more conservative process-wide four-second interval. The [EHWiki API documentation](https://ehwiki.org/wiki/API) permits up to 25 `gdata` entries per batch; the plugin takes at most 10 search results and sends them in one API request.

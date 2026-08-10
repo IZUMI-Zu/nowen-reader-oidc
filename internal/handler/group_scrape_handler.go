@@ -176,25 +176,45 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 		update.ExternalRatingUpdatedAt = &now
 	}
 
-	if err := store.UpdateGroupMetadata(id, update); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用元数据失败"})
-		return
-	}
-
-	// 处理标签
+	// Resolve the final normalized tag set before writing. Metadata fields and
+	// ComicGroupTag are then committed atomically by the store.
+	var mergedTags []string
+	applyTags := false
 	if meta.Genre != "" && shouldApply("tags") {
 		genres := splitAndTrim(meta.Genre)
 		if len(genres) > 0 {
-			existingTags, _ := store.GetGroupTags(id)
+			existingTags, err := store.GetGroupTags(id)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "读取现有标签失败"})
+				return
+			}
 			existingNames := make([]string, 0, len(existingTags))
 			for _, t := range existingTags {
 				existingNames = append(existingNames, t.Name)
 			}
-			allNames := mergeMetadataTags(existingNames, genres)
-			_ = store.SetGroupTags(id, allNames)
-			if body.SyncTags && allowMemberSync {
-				_, _, _, _ = store.SyncGroupTagsToVolumes(id)
-			}
+			mergedTags = mergeMetadataTags(existingNames, genres)
+			applyTags = true
+		}
+	}
+	var updateErr error
+	if applyTags {
+		updateErr = store.UpdateGroupMetadataAndTags(id, update, mergedTags)
+	} else {
+		updateErr = store.UpdateGroupMetadata(id, update)
+	}
+	if updateErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用元数据失败"})
+		return
+	}
+	if applyTags && body.SyncTags && allowMemberSync {
+		total, synced, _, err := store.SyncGroupTagsToVolumes(id)
+		if err != nil || synced != total {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "合集标签已保存，但同步成员标签失败",
+				"syncSuccess": synced,
+				"syncErrors":  total - synced,
+			})
+			return
 		}
 	}
 
@@ -206,10 +226,23 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 	// 同步元数据到所有卷
 	var syncSuccess, syncErrors int
 	if body.SyncToVolumes && allowMemberSync {
-		syncSuccess, syncErrors, _ = syncGroupMetadataToVolumes(id, meta, fieldsSet, body.Overwrite, body.SyncRating)
+		var syncErr error
+		syncSuccess, syncErrors, syncErr = syncGroupMetadataToVolumes(id, meta, fieldsSet, body.Overwrite, body.SyncRating)
+		if syncErr != nil || syncErrors > 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "合集元数据已保存，但同步成员字段失败",
+				"syncSuccess": syncSuccess,
+				"syncErrors":  syncErrors,
+			})
+			return
+		}
 	}
 
-	updated, _ := store.GetGroupByID(id)
+	updated, err := store.GetGroupByID(id)
+	if err != nil || updated == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "合集元数据已保存，但刷新详情失败"})
+		return
+	}
 	resp := gin.H{"success": true, "group": updated}
 	if body.SyncToVolumes && allowMemberSync {
 		resp["syncSuccess"] = syncSuccess
@@ -259,7 +292,9 @@ func syncMetadataToComicIDs(comicIDs []string, meta service.ComicMetadata, field
 			updates["language"] = meta.Language
 		}
 		if meta.Genre != "" && shouldApply("genre") {
-			updates["genre"] = meta.Genre
+			if genre := metadataGenreForMemberSync(meta.Genre); genre != "" {
+				updates["genre"] = genre
+			}
 		}
 		if meta.Description != "" && shouldApply("description") {
 			updates["description"] = meta.Description
@@ -287,6 +322,17 @@ func syncMetadataToComicIDs(comicIDs []string, meta service.ComicMetadata, field
 		}
 	}
 	return successCount, errorCount, nil
+}
+
+func metadataGenreForMemberSync(genre string) string {
+	tags := splitAndTrim(genre)
+	filtered := tags[:0]
+	for _, tag := range tags {
+		if !service.IsEHentaiGallerySourceTag(tag) {
+			filtered = append(filtered, tag)
+		}
+	}
+	return strings.Join(filtered, ", ")
 }
 
 // filterEmptyFieldsOnly 过滤掉漫画中已有值的字段，只保留空字段的更新

@@ -172,6 +172,8 @@ chmod 600 .env
 
 插件还会附加一个 `source:https://.../g/{gid}/{token}` 标签，保留精确来源。再次应用其他 EH/EX 画廊时，旧的 EH/EX `source:` 标签会被替换，避免下次搜索继续命中过期画廊。封面只接受 EH 官方 HTTPS 图片域名；其他主机的 URL 会被丢弃。
 
+合集或目录作品把标签同步到成员漫画时，会同步 `artist:*`、`female:*`、`male:*`、`parody:*` 等内容标签，但不会下发父级的 EH/EX `source:`。每本漫画会保留自己的精确 gallery 来源，避免后续直达查询命中父级或其他卷的 gallery。
+
 ## 限流与网络安全
 
 根据 [EHWiki 搜索限制](https://ehwiki.org/wiki/searches)，gallery 搜索最短间隔为 3 秒；本插件采用更保守的进程级 4 秒间隔。根据 [EHWiki API 文档](https://ehwiki.org/wiki/API)，`gdata` 最多可批量请求 25 个条目；本插件一次搜索最多取前 10 个结果，并合并为一个 API 请求。

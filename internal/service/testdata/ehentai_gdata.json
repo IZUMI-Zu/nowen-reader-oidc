@@ -13,10 +13,18 @@
       "rating": "4.74",
       "tags": [
         "artist:yatsuki hiyori",
+        "artist:second artist",
         "group:fixture circle",
+        "group:second circle",
         "language:english",
         "language:translated",
         "female:example tag",
+        "female:second tag",
+        "FEMALE:EXAMPLE TAG",
+        "male:example male tag",
+        "parody:fixture work",
+        "character:fixture heroine",
+        "other:full color",
         "tankoubon"
       ]
     }

@@ -471,7 +471,7 @@ export default function TagManagerPage() {
     if (selectedTags.size === 0) return;
     setConfirmAction({
       title: t.tagManager?.batchDelete || "批量删除",
-      message: `${t.tagManager?.confirmBatchDeleteTags || "确认删除选中的"} ${selectedTags.size} ${t.tagManager?.tags || "个标签"}？${t.tagManager?.batchDeleteWarning || "此操作将从所有漫画中移除这些标签，不可撤销。"}`,
+      message: `${t.tagManager?.confirmBatchDeleteTags || "确认删除选中的"} ${selectedTags.size} ${t.tagManager?.tags || "个标签"}？${t.tagManager?.batchDeleteWarning || "此操作将从所有漫画、合集和目录作品中移除这些标签，不可撤销。"}`,
       onConfirm: async () => {
         setConfirmAction(null);
         setBatchLoading(true);
@@ -1551,7 +1551,7 @@ export default function TagManagerPage() {
               {t.tagManager?.mergeTitle || "合并标签"}
             </h3>
             <p className="mt-2 text-sm text-muted">
-              {t.tagManager?.mergeDesc || "将选中的标签合并为一个。所有漫画将使用目标标签名称。"}
+              {t.tagManager?.mergeDesc || "将选中的标签合并为一个。所有漫画、合集和目录作品将使用目标标签名称。"}
             </p>
             <div className="mt-3 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
               {Array.from(selectedTags).map((name) => (

@@ -2,10 +2,13 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/nowen-reader/nowen-reader/internal/model"
 )
+
+var ErrOIDCLastBoundAdministrator = errors.New("cannot remove the last administrator bound to the active OIDC issuer")
 
 // CreateUser inserts a new user into the database.
 func CreateUser(user *model.User) error {
@@ -113,17 +116,92 @@ func UpdateUserProfile(userID, nickname string) error {
 
 // DeleteUser removes a user by ID (cascade deletes sessions).
 func DeleteUser(userID string) error {
-	_, err := db.Exec(`DELETE FROM "User" WHERE "id" = ?`, userID)
-	return err
+	return DeleteUserPreservingOIDCAdmin(userID, "")
+}
+
+// DeleteUserPreservingOIDCAdmin atomically preserves at least one administrator
+// bound to protectedIssuer. An empty issuer keeps the legacy unrestricted path.
+func DeleteUserPreservingOIDCAdmin(userID, protectedIssuer string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`DELETE FROM "User" WHERE "id" = ? AND (
+		? = '' OR NOT (
+			EXISTS (
+				SELECT 1 FROM "User" current
+				JOIN "ExternalIdentity" identity ON identity."userId" = current."id"
+				WHERE current."id" = ? AND current."role" = 'admin' AND identity."issuer" = ?
+			) AND NOT EXISTS (
+				SELECT 1 FROM "User" other
+				JOIN "ExternalIdentity" identity ON identity."userId" = other."id"
+				WHERE other."id" <> ? AND other."role" = 'admin' AND identity."issuer" = ?
+			)
+		)
+	)`, userID, protectedIssuer, userID, protectedIssuer, userID, protectedIssuer)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		var exists int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM "User" WHERE "id" = ?`, userID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 1 {
+			return ErrOIDCLastBoundAdministrator
+		}
+	}
+	return tx.Commit()
 }
 
 // UpdateUserRole 更新用户角色（admin 或 user）。
 func UpdateUserRole(userID, role string) error {
-	_, err := db.Exec(
-		`UPDATE "User" SET "role" = ?, "updatedAt" = ? WHERE "id" = ?`,
-		role, time.Now(), userID,
-	)
-	return err
+	return UpdateUserRolePreservingOIDCAdmin(userID, role, "")
+}
+
+// UpdateUserRolePreservingOIDCAdmin applies the role update only when it does
+// not demote the final administrator bound to protectedIssuer.
+func UpdateUserRolePreservingOIDCAdmin(userID, role, protectedIssuer string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE "User" SET "role" = ?, "updatedAt" = ? WHERE "id" = ? AND (
+		? = 'admin' OR ? = '' OR NOT (
+			EXISTS (
+				SELECT 1 FROM "User" current
+				JOIN "ExternalIdentity" identity ON identity."userId" = current."id"
+				WHERE current."id" = ? AND current."role" = 'admin' AND identity."issuer" = ?
+			) AND NOT EXISTS (
+				SELECT 1 FROM "User" other
+				JOIN "ExternalIdentity" identity ON identity."userId" = other."id"
+				WHERE other."id" <> ? AND other."role" = 'admin' AND identity."issuer" = ?
+			)
+		)
+	)`, role, time.Now(), userID, role, protectedIssuer, userID, protectedIssuer, userID, protectedIssuer)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		var exists int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM "User" WHERE "id" = ?`, userID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 1 {
+			return ErrOIDCLastBoundAdministrator
+		}
+	}
+	return tx.Commit()
 }
 
 // UpdateUserAiEnabled 更新用户的 AI 使用权限。

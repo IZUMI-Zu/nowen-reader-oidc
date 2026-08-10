@@ -707,6 +707,60 @@ func TestOIDCUnlinkUsesLeasedPolicySnapshot(t *testing.T) {
 	}
 }
 
+func TestUserManagementCannotRemoveLastBoundOIDCAdministrator(t *testing.T) {
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-admin-invariant.db")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.CloseDB)
+	const issuer = "https://identity.example.com"
+	for _, user := range []*model.User{
+		{ID: "operator", Username: "operator", Password: "hash", Nickname: "Operator", Role: "admin"},
+		{ID: "bound-admin", Username: "bound-admin", Password: "hash", Nickname: "Bound", Role: "admin"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.LinkOIDCIdentity(context.Background(), "bound-admin", oidcauth.VerifiedIdentity{
+		Issuer: issuer, Subject: "bound-subject",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createSessionForOIDCTest(t, "operator-session", "operator", model.SessionAuthMethodPassword, time.Now().UTC())
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{},
+		state: oidcruntime.State{Config: config.OIDCConfig{
+			Enabled: true, IssuerURL: issuer, DisablePasswordLogin: true,
+		}},
+	}
+	router := gin.New()
+	handler := newAuthHandlerWithRuntime(runtime)
+	users := router.Group("/api/auth/users")
+	users.Use(middleware.AdminRequired())
+	users.PUT("", handler.UpdateUser)
+	users.DELETE("", handler.DeleteUserHandler)
+
+	demote := performAuthedRequest(router, http.MethodPut, "/api/auth/users", map[string]string{
+		"action": "updateRole", "userId": "bound-admin", "role": "user",
+	}, "operator-session")
+	if demote.Code != http.StatusConflict || !strings.Contains(demote.Body.String(), "oidc_admin_required") {
+		t.Fatalf("demote = %d: %s", demote.Code, demote.Body.String())
+	}
+	remove := performAuthedRequest(router, http.MethodDelete, "/api/auth/users", map[string]string{
+		"userId": "bound-admin",
+	}, "operator-session")
+	if remove.Code != http.StatusConflict || !strings.Contains(remove.Body.String(), "oidc_admin_required") {
+		t.Fatalf("delete = %d: %s", remove.Code, remove.Body.String())
+	}
+	user, err := store.GetUserByID("bound-admin")
+	if err != nil || user == nil || user.Role != "admin" || runtime.leaseCalls != 2 {
+		t.Fatalf("protected administrator = %+v, err=%v, leaseCalls=%d", user, err, runtime.leaseCalls)
+	}
+}
+
 func TestOIDCReauthRequiresTheSameLinkedIdentityAndRefreshesAuthenticationTime(t *testing.T) {
 	cfg := enabledOIDCHandlerConfig()
 	service := &fakeOIDCService{beginResult: oidcauth.AuthorizationRedirect{

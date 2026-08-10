@@ -546,7 +546,17 @@ func (h *AuthHandler) UpdateUser(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role, must be 'admin' or 'user'"})
 			return
 		}
-		if err := store.UpdateUserRole(req.UserID, newRole); err != nil {
+		err := h.oidc.WithStateLease(func(state oidcruntime.State) error {
+			return store.UpdateUserRolePreservingOIDCAdmin(req.UserID, newRole, protectedOIDCAdminIssuer(state))
+		})
+		if errors.Is(err, store.ErrOIDCLastBoundAdministrator) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "At least one administrator must remain linked to the active OIDC provider",
+				"code":  "oidc_admin_required",
+			})
+			return
+		}
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
 			return
 		}
@@ -597,12 +607,29 @@ func (h *AuthHandler) DeleteUserHandler(c *gin.Context) {
 		return
 	}
 
-	if err := store.DeleteUser(req.UserID); err != nil {
+	err := h.oidc.WithStateLease(func(state oidcruntime.State) error {
+		return store.DeleteUserPreservingOIDCAdmin(req.UserID, protectedOIDCAdminIssuer(state))
+	})
+	if errors.Is(err, store.ErrOIDCLastBoundAdministrator) {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "At least one administrator must remain linked to the active OIDC provider",
+			"code":  "oidc_admin_required",
+		})
+		return
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func protectedOIDCAdminIssuer(state oidcruntime.State) string {
+	if state.Config.DisablePasswordLogin {
+		return state.Config.IssuerURL
+	}
+	return ""
 }
 
 // CreateUserByAdmin handles POST /api/auth/users (admin only)

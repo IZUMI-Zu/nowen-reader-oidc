@@ -1,6 +1,7 @@
 "use client";
 
 import { apiClient } from "@/lib/apiClient";
+import { apiPath } from "@/lib/base-path";
 import { setUserScope } from "@/hooks/useComicList";
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 
@@ -10,6 +11,7 @@ interface AuthUser {
   nickname: string;
   role: string;
   aiEnabled: boolean;
+  hasPassword: boolean;
 }
 
 interface AuthContextType {
@@ -17,7 +19,12 @@ interface AuthContextType {
   loading: boolean;
   needsSetup: boolean;
   registrationMode: string;
+	passwordLoginEnabled: boolean;
+	OIDCEnabled: boolean;
+	oidcProviderName: string;
+	oidcLinked: boolean;
   login: (username: string, password: string) => Promise<void>;
+	loginWithOIDC: () => void;
   register: (username: string, password: string, nickname?: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -30,6 +37,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [needsSetup, setNeedsSetup] = useState(false);
   const [registrationMode, setRegistrationMode] = useState("open");
+	const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
+	const [OIDCEnabled, setOIDCEnabled] = useState(false);
+	const [oidcProviderName, setOIDCProviderName] = useState("OpenID Connect");
+	const [oidcLinked, setOIDCLinked] = useState(false);
 
   const refreshUser = useCallback(async () => {
     try {
@@ -45,6 +56,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         setNeedsSetup(d.needsSetup || false);
         if (d.registrationMode) setRegistrationMode(d.registrationMode);
+		const oidc = d.loginMethods?.oidc;
+		setPasswordLoginEnabled(d.loginMethods?.password !== false);
+		setOIDCEnabled(oidc?.enabled === true);
+		if (oidc?.displayName) setOIDCProviderName(oidc.displayName);
+		setOIDCLinked(oidc?.linked === true);
       } catch (err: any) {
         // Only clear user on genuine 401 (session expired / not logged in).
         // Network errors (status=0), timeouts, and 5xx should NOT log the user out,
@@ -72,6 +88,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setNeedsSetup(false);
   };
 
+	const loginWithOIDC = () => {
+		const returnTo = window.location.pathname + window.location.search;
+		window.location.assign(`${apiPath("/api/auth/oidc/login")}?returnTo=${encodeURIComponent(returnTo)}`);
+	};
+
   const register = async (username: string, password: string, nickname?: string) => {
     const data = await apiClient.post("/api/auth/register", { username, password, nickname }) as any;
     const u = data.user;
@@ -87,7 +108,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, needsSetup, registrationMode, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{
+		user, loading, needsSetup, registrationMode, passwordLoginEnabled, OIDCEnabled, oidcProviderName, oidcLinked,
+		login, loginWithOIDC, register, logout, refreshUser,
+	}}>
       {children}
     </AuthContext.Provider>
   );

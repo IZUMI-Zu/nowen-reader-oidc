@@ -163,15 +163,50 @@ func createTables() error {
 		// UserSession
 		// ============================================================
 		`CREATE TABLE IF NOT EXISTS "UserSession" (
-			"id"        TEXT NOT NULL PRIMARY KEY,
-			"userId"    TEXT NOT NULL,
-			"expiresAt" DATETIME NOT NULL,
-			"createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			"id"                TEXT NOT NULL PRIMARY KEY,
+			"userId"            TEXT NOT NULL,
+			"expiresAt"         DATETIME NOT NULL,
+			"authMethod"        TEXT NOT NULL DEFAULT 'password',
+			"authenticatedAt"   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			"absoluteExpiresAt" DATETIME,
+			"createdAt"         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			CONSTRAINT "UserSession_userId_fkey" FOREIGN KEY ("userId")
 				REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS "UserSession_userId_idx" ON "UserSession"("userId")`,
 		`CREATE INDEX IF NOT EXISTS "UserSession_expiresAt_idx" ON "UserSession"("expiresAt")`,
+
+		// ============================================================
+		// OIDC relying-party state
+		// ============================================================
+		`CREATE TABLE IF NOT EXISTS "ExternalIdentity" (
+			"id"            TEXT NOT NULL PRIMARY KEY,
+			"userId"        TEXT NOT NULL,
+			"issuer"        TEXT NOT NULL,
+			"subject"       TEXT NOT NULL,
+			"email"         TEXT NOT NULL DEFAULT '',
+			"emailVerified" BOOLEAN NOT NULL DEFAULT 0,
+			"displayName"   TEXT NOT NULL DEFAULT '',
+			"createdAt"     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			"lastLoginAt"   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			CONSTRAINT "ExternalIdentity_userId_fkey" FOREIGN KEY ("userId")
+				REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS "ExternalIdentity_issuer_subject_key" ON "ExternalIdentity"("issuer", "subject")`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS "ExternalIdentity_user_issuer_key" ON "ExternalIdentity"("userId", "issuer")`,
+		`CREATE TABLE IF NOT EXISTS "OIDCLoginTransaction" (
+			"stateHash"     TEXT NOT NULL PRIMARY KEY,
+			"bindingHash"   TEXT NOT NULL,
+			"nonce"         TEXT NOT NULL,
+			"pkceVerifier"  TEXT NOT NULL,
+			"purpose"       TEXT NOT NULL,
+			"sessionUserId" TEXT NOT NULL DEFAULT '',
+			"returnTo"      TEXT NOT NULL,
+			"expiresAt"     DATETIME NOT NULL,
+			"consumedAt"    DATETIME,
+			"createdAt"     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS "OIDCLoginTransaction_expiresAt_idx" ON "OIDCLoginTransaction"("expiresAt")`,
 
 		// ============================================================
 		// APIKey

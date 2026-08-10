@@ -61,7 +61,7 @@ func CountUsers() (int, error) {
 // ListUsers returns all users (without password), ordered by creation time.
 func ListUsers() ([]model.AuthUser, error) {
 	rows, err := db.Query(
-		`SELECT "id", "username", "nickname", "role", "aiEnabled"
+		`SELECT "id", "username", "nickname", "role", "aiEnabled", "password" != ''
 		 FROM "User" ORDER BY "createdAt" ASC`,
 	)
 	if err != nil {
@@ -72,7 +72,7 @@ func ListUsers() ([]model.AuthUser, error) {
 	var users []model.AuthUser
 	for rows.Next() {
 		var u model.AuthUser
-		if err := rows.Scan(&u.ID, &u.Username, &u.Nickname, &u.Role, &u.AiEnabled); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Nickname, &u.Role, &u.AiEnabled, &u.HasPassword); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -87,6 +87,19 @@ func UpdateUserPassword(userID, hashedPassword string) error {
 		hashedPassword, time.Now(), userID,
 	)
 	return err
+}
+
+// SetInitialUserPassword atomically adds a password only when the account does
+// not already have one. This prevents concurrent setup requests from replacing
+// a credential without proving the existing password.
+func SetInitialUserPassword(userID, hashedPassword string) (bool, error) {
+	result, err := db.Exec(`UPDATE "User" SET "password" = ?, "updatedAt" = ? WHERE "id" = ? AND "password" = ''`,
+		hashedPassword, time.Now().UTC(), userID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
 }
 
 // UpdateUserProfile updates a user's nickname.
@@ -134,10 +147,20 @@ func GetUserRole(userID string, role *string) error {
 
 // CreateSession inserts a new user session.
 func CreateSession(session *model.UserSession) error {
+	now := time.Now().UTC()
+	if session.AuthMethod == "" {
+		session.AuthMethod = model.SessionAuthMethodPassword
+	}
+	if session.AuthenticatedAt.IsZero() {
+		session.AuthenticatedAt = now
+	}
+	session.CreatedAt = now
 	_, err := db.Exec(
-		`INSERT INTO "UserSession" ("id", "userId", "expiresAt", "createdAt")
-		 VALUES (?, ?, ?, ?)`,
-		session.ID, session.UserID, session.ExpiresAt, time.Now(),
+		`INSERT INTO "UserSession"
+		 ("id", "userId", "expiresAt", "authMethod", "authenticatedAt", "absoluteExpiresAt", "createdAt")
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.UserID, session.ExpiresAt, session.AuthMethod,
+		session.AuthenticatedAt, session.AbsoluteExpiresAt, session.CreatedAt,
 	)
 	return err
 }
@@ -147,16 +170,19 @@ func CreateSession(session *model.UserSession) error {
 func GetSessionWithUser(token string) (*model.UserSession, *model.User, error) {
 	session := &model.UserSession{}
 	user := &model.User{}
+	var absoluteExpiresAt sql.NullTime
 
 	err := db.QueryRow(
-		`SELECT s."id", s."userId", s."expiresAt", s."createdAt",
+		`SELECT s."id", s."userId", s."expiresAt", s."authMethod",
+		        s."authenticatedAt", s."absoluteExpiresAt", s."createdAt",
 		        u."id", u."username", u."password", u."nickname", u."role", u."aiEnabled", u."createdAt", u."updatedAt"
 		 FROM "UserSession" s
 		 JOIN "User" u ON u."id" = s."userId"
 		 WHERE s."id" = ?`,
 		token,
 	).Scan(
-		&session.ID, &session.UserID, &session.ExpiresAt, &session.CreatedAt,
+		&session.ID, &session.UserID, &session.ExpiresAt, &session.AuthMethod,
+		&session.AuthenticatedAt, &absoluteExpiresAt, &session.CreatedAt,
 		&user.ID, &user.Username, &user.Password, &user.Nickname, &user.Role, &user.AiEnabled, &user.CreatedAt, &user.UpdatedAt,
 	)
 
@@ -165,6 +191,9 @@ func GetSessionWithUser(token string) (*model.UserSession, *model.User, error) {
 	}
 	if err != nil {
 		return nil, nil, err
+	}
+	if absoluteExpiresAt.Valid {
+		session.AbsoluteExpiresAt = &absoluteExpiresAt.Time
 	}
 	return session, user, nil
 }
@@ -184,6 +213,13 @@ func DeleteSessionsByUserID(userID string, exceptToken string) error {
 // RenewSession 更新 Session 的过期时间（自动续期）。
 func RenewSession(token string, newExpiry time.Time) error {
 	_, err := db.Exec(`UPDATE "UserSession" SET "expiresAt" = ? WHERE "id" = ?`, newExpiry, token)
+	return err
+}
+
+// MarkSessionAuthenticated records a successful password or OIDC
+// reauthentication for later sensitive-operation checks.
+func MarkSessionAuthenticated(token string, authenticatedAt time.Time) error {
+	_, err := db.Exec(`UPDATE "UserSession" SET "authenticatedAt" = ? WHERE "id" = ?`, authenticatedAt, token)
 	return err
 }
 

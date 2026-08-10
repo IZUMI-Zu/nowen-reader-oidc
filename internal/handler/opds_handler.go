@@ -38,7 +38,7 @@ func getBaseURL(c *gin.Context) string {
 	host := c.Request.Host
 	prefix := config.BasePath()
 
-	if config.TrustProxyHeaders() {
+	if config.TrustProxyHeadersFrom(c.Request.RemoteAddr) {
 		if forwardedProto := strings.ToLower(firstForwardedValue(c.GetHeader("X-Forwarded-Proto"))); forwardedProto == "http" || forwardedProto == "https" {
 			scheme = forwardedProto
 		}

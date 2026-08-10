@@ -1,10 +1,13 @@
 package middleware
 
 import (
+	"bytes"
 	"compress/gzip"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -58,8 +61,8 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 
 	expectedHeaders := map[string]string{
 		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":       "SAMEORIGIN",
-		"X-XSS-Protection":      "1; mode=block",
+		"X-Frame-Options":        "SAMEORIGIN",
+		"X-XSS-Protection":       "1; mode=block",
 	}
 
 	for header, expected := range expectedHeaders {
@@ -179,6 +182,38 @@ func TestRequestLoggerMiddleware(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d", w.Code)
+	}
+}
+
+func TestRequestAndErrorLoggersRedactOIDCCallbackCredentials(t *testing.T) {
+	var output bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&output)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+	errorLogBuffer.Clear()
+	t.Cleanup(errorLogBuffer.Clear)
+
+	r := gin.New()
+	r.Use(RequestLogger(), ErrorLogCapture())
+	r.GET("/reader/api/auth/oidc/callback", func(c *gin.Context) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid callback"})
+	})
+	request := httptest.NewRequest(http.MethodGet,
+		"/reader/api/auth/oidc/callback?code=secret-code&state=secret-state&error_description=cancelled", nil)
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+
+	if strings.Contains(output.String(), "secret-code") || strings.Contains(output.String(), "secret-state") {
+		t.Fatalf("request log leaked OIDC callback credentials: %s", output.String())
+	}
+	entries := errorLogBuffer.GetAll()
+	if len(entries) != 1 || strings.Contains(entries[0].Path, "secret-code") || strings.Contains(entries[0].Path, "secret-state") || !strings.Contains(entries[0].Path, "REDACTED") {
+		t.Fatalf("error log did not redact OIDC callback: %#v", entries)
 	}
 }
 

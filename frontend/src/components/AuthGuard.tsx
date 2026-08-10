@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { useTranslation } from "@/lib/i18n";
 import { useSiteSettings } from "@/hooks/useSiteSettings";
 import { apiPath } from "@/lib/base-path";
-import { User, Lock, Eye, EyeOff, LogIn, UserPlus, BookMarked } from "lucide-react";
+import { User, Lock, Eye, EyeOff, LogIn, UserPlus, BookMarked, ShieldCheck } from "lucide-react";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const { user, loading, needsSetup } = useAuth();
@@ -139,10 +139,10 @@ function SetupPage() {
 }
 
 function LoginPage() {
-  const { login, register, registrationMode } = useAuth();
+  const { login, loginWithOIDC, register, registrationMode, passwordLoginEnabled, OIDCEnabled, oidcProviderName } = useAuth();
   const t = useTranslation();
   const { siteName, siteIcon } = useSiteSettings();
-  const canRegister = registrationMode === "open";
+  const canRegister = passwordLoginEnabled && registrationMode === "open";
   const [isRegister, setIsRegister] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -150,6 +150,14 @@ function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const target = new URL(window.location.href);
+    if (!target.searchParams.has("oidc_error")) return;
+    setError(t.auth?.oidcError || "Single sign-on did not complete. Please try again.");
+    target.searchParams.delete("oidc_error");
+    window.history.replaceState({}, "", target.pathname + target.search + target.hash);
+  }, [t.auth?.oidcError]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -189,7 +197,7 @@ function LoginPage() {
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {passwordLoginEnabled && <form onSubmit={handleSubmit} className="space-y-4">
           <div className="relative">
             <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
             <input
@@ -237,10 +245,6 @@ function LoginPage() {
             </button>
           </div>
 
-          {error && (
-            <div className="text-red-400 text-sm text-center">{error}</div>
-          )}
-
           <button
             type="submit"
             disabled={submitting}
@@ -253,9 +257,37 @@ function LoginPage() {
                 ? (t.auth?.register || "Register")
                 : (t.auth?.login || "Login")}
           </button>
-        </form>
+        </form>}
 
-        <div className="text-center mt-4">
+        {error && (
+          <div className="mt-4 text-red-400 text-sm text-center">{error}</div>
+        )}
+
+		{OIDCEnabled && !isRegister && (
+		  <div className={passwordLoginEnabled ? "mt-4 space-y-4" : "space-y-4"}>
+			{passwordLoginEnabled && <div className="flex items-center gap-3 text-xs text-muted/60">
+			  <span className="h-px flex-1 bg-border" />
+			  <span>{t.auth?.or || "or"}</span>
+			  <span className="h-px flex-1 bg-border" />
+			</div>}
+			<button
+			  type="button"
+			  onClick={loginWithOIDC}
+			  className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-card py-3 font-medium text-foreground hover:border-accent hover:text-accent"
+			>
+			  <ShieldCheck className="h-4 w-4" />
+			  {(t.auth?.loginWith || "Continue with {provider}").replace("{provider}", oidcProviderName)}
+			</button>
+		  </div>
+		)}
+
+		{!passwordLoginEnabled && !OIDCEnabled && (
+		  <p className="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-center text-sm text-red-400">
+			{t.auth?.noLoginMethods || "No login method is currently available. Contact the administrator."}
+		  </p>
+		)}
+
+        {passwordLoginEnabled && <div className="text-center mt-4">
           {canRegister ? (
             <button
               onClick={() => {
@@ -277,7 +309,7 @@ function LoginPage() {
               </p>
             )
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );

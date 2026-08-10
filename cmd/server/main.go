@@ -112,6 +112,13 @@ func main() {
 	gin.SetMode(mode)
 
 	r := gin.New() // Use gin.New() instead of gin.Default() for custom middleware
+	trustedProxies, err := config.GetTrustedProxies()
+	if err != nil {
+		log.Fatalf("[Main] Invalid trusted proxy configuration: %v", err)
+	}
+	if err := r.SetTrustedProxies(trustedProxies); err != nil {
+		log.Fatalf("[Main] Failed to configure trusted proxies: %v", err)
+	}
 
 	// Global middleware stack
 	r.Use(middleware.Recovery())

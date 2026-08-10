@@ -87,11 +87,7 @@ func ErrorLogCapture() gin.HandlerFunc {
 		status := c.Writer.Status()
 		// 只记录 4xx 和 5xx 错误（排除 404 静态资源请求以减少噪音）
 		if status >= 400 {
-			path := c.Request.URL.Path
-			raw := c.Request.URL.RawQuery
-			if raw != "" {
-				path = path + "?" + raw
-			}
+			path := requestPathForLog(c.Request.URL)
 
 			latency := time.Since(start)
 

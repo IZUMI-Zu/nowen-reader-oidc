@@ -16,6 +16,13 @@ func registerAuthRoutes(api *gin.RouterGroup) {
 		// Login/register use strict rate limiting to prevent brute-force
 		authGroup.POST("/register", middleware.RateLimitAuth(), auth.Register)
 		authGroup.POST("/login", middleware.RateLimitAuth(), auth.Login)
+		authGroup.POST("/reauth/password", middleware.SessionRequired(), middleware.RateLimitAuth(), auth.PasswordReauth)
+		authGroup.POST("/password", middleware.SessionRequired(), middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitAuth(), auth.SetInitialPassword)
+		authGroup.GET("/oidc/login", middleware.RateLimitAuth(), auth.OIDCLogin)
+		authGroup.GET("/oidc/callback", middleware.RateLimitAuth(), auth.OIDCCallback)
+		authGroup.POST("/oidc/link", middleware.SessionRequired(), middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitAuth(), auth.OIDCLink)
+		authGroup.GET("/oidc/reauth", middleware.SessionRequired(), middleware.RateLimitAuth(), auth.OIDCReauth)
+		authGroup.DELETE("/oidc/link", middleware.SessionRequired(), middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitAuth(), auth.OIDCUnlink)
 		// Logout and session check don't need strict limiting
 		authGroup.POST("/logout", auth.Logout)
 		authGroup.GET("/me", auth.Me)

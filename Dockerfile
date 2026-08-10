@@ -27,7 +27,7 @@ RUN npm run build && \
     (echo "[frontend] ERROR: index.html not found in dist/" && exit 1)
 
 # --- Stage 2: Build Go backend ---
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS builder
 
 # Multi-platform build args (automatically set by Docker buildx)
 ARG TARGETPLATFORM

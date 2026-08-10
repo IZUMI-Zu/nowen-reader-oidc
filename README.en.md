@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/github/stars/cropflre/nowen-reader?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/docker/pulls/cropflre/nowen-reader?style=flat-square" alt="Docker Pulls" />
   <img src="https://img.shields.io/docker/image-size/cropflre/nowen-reader/latest?style=flat-square" alt="Image Size" />
-  <img src="https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go" alt="Go" />
+  <img src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&logo=go" alt="Go" />
   <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react" alt="React" />
 </p>
 
@@ -83,6 +83,7 @@ To deploy at `https://example.com/reader/`, set `BASE_PATH=/reader` and configur
 |:---|:---|
 | [Installation Guide](./docs/INSTALL.en.md) | 5 deployment methods: Docker Hub, NAS, source build, binary, Docker Compose |
 | [Configuration](./docs/CONFIGURATION.en.md) | Environment variables, site settings, AI config, scanner parameters, supported formats |
+| [OpenID Connect Configuration](./docs/OIDC.en.md) | Provider registration, account linking, password-login switch, recovery, and troubleshooting |
 | [API Reference](./docs/API.md) | Full RESTful API documentation |
 | [Development Guide](./docs/DEVELOPMENT.md) | Prerequisites, project structure, Makefile, tech stack, CI/CD |
 | [FAQ](./docs/FAQ.md) | Common questions about deployment, permissions, thumbnails, PDF, AI, OPDS |
@@ -144,7 +145,7 @@ To deploy at `https://example.com/reader/`, set `BASE_PATH=/reader` and configur
 
 ## 🛠️ Tech Stack
 
-- **Backend**: Go 1.23 · Gin · SQLite (`modernc.org/sqlite`) · FTS5 · fsnotify · go:embed
+- **Backend**: Go 1.25 · Gin · SQLite (`modernc.org/sqlite`) · FTS5 · fsnotify · go:embed
 - **Frontend**: React 19 · Vite 6 · TypeScript 5 · Tailwind CSS v4 · React Router v7 · PDF.js
 - **Mobile**: Flutter 3.x · Riverpod 2.x · GoRouter · Dio · Material 3
 - **Deploy**: Multi-stage Docker (~30 MB) · amd64 + arm64 · GitHub Actions CI/CD

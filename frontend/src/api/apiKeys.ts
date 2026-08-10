@@ -18,7 +18,7 @@ export async function listAPIKeys(): Promise<APIKeyRecord[]> {
 
 export async function createAPIKey(input: {
   name: string;
-  currentPassword: string;
+	currentPassword?: string;
   expiresInDays: number;
 }): Promise<{ apiKey: APIKeyRecord; key: string }> {
   return apiClient.post("/api/auth/api-keys", input);
@@ -28,7 +28,7 @@ export async function revokeAPIKey(id: string): Promise<void> {
   await apiClient.delete(`/api/auth/api-keys/${encodeURIComponent(id)}`);
 }
 
-export async function revokeAllAPIKeys(currentPassword: string): Promise<number> {
+export async function revokeAllAPIKeys(currentPassword?: string): Promise<number> {
   const response = await apiClient.delete<{ revokedCount: number }>("/api/auth/api-keys", {
     currentPassword,
   });

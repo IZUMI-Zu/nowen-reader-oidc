@@ -68,10 +68,13 @@ func TestOPDSBasePathSubpath(t *testing.T) {
 func TestOPDSForwardedPrefixHeader(t *testing.T) {
 	orig := os.Getenv("BASE_PATH")
 	origTrust := os.Getenv("TRUST_PROXY_HEADERS")
+	origProxies := os.Getenv("TRUSTED_PROXIES")
 	defer os.Setenv("BASE_PATH", orig)
 	defer os.Setenv("TRUST_PROXY_HEADERS", origTrust)
+	defer os.Setenv("TRUSTED_PROXIES", origProxies)
 	os.Setenv("BASE_PATH", "")
 	os.Setenv("TRUST_PROXY_HEADERS", "true")
+	os.Setenv("TRUSTED_PROXIES", "192.0.2.1")
 
 	router := setupTestRouter(t)
 	user, token := createOPDSTestUserAndKey(t, "opds-bp-fwd", "opds-bp-fwd")

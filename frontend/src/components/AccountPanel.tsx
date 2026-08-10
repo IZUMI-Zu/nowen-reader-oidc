@@ -1,7 +1,8 @@
 "use client";
 
 import { apiPath } from "@/lib/base-path";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { apiClient } from "@/lib/apiClient";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { useLocale } from "@/lib/i18n";
 import {
@@ -28,10 +29,22 @@ import {
 } from "@/api/apiKeys";
 
 export function AccountPanel() {
-  const { user, refreshUser } = useAuth();
+	const { user, refreshUser, passwordLoginEnabled, OIDCEnabled, oidcProviderName, oidcLinked } = useAuth();
+	const { locale } = useLocale();
+	const [oidcError, setOIDCError] = useState("");
+
+	useLayoutEffect(() => {
+		const target = new URL(window.location.href);
+		if (!target.searchParams.has("oidc_error")) return;
+		window.sessionStorage.removeItem(pendingAPIKeyIntentKey);
+		setOIDCError(locale === "zh-CN" ? "单点登录未完成，请重试。" : "Single sign-on did not complete. Please try again.");
+		target.searchParams.delete("oidc_error");
+		window.history.replaceState({}, "", target.pathname + target.search + target.hash);
+	}, [locale]);
 
   return (
     <div className="space-y-6">
+	  {oidcError && <p className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{oidcError}</p>}
       {/* 用户信息概览 */}
       <div className="rounded-2xl border border-border/40 bg-gradient-to-br from-accent/5 via-card to-card p-5 sm:p-6">
         <div className="flex items-center gap-4">
@@ -55,10 +68,102 @@ export function AccountPanel() {
       {/* 修改密码 */}
       <PasswordSection />
 
+	  {OIDCEnabled && (
+		<OIDCIdentitySection
+		  providerName={oidcProviderName}
+		  linked={oidcLinked}
+		  hasPassword={user?.hasPassword === true}
+		  passwordLoginEnabled={passwordLoginEnabled}
+		  onChanged={refreshUser}
+		/>
+	  )}
+
       {/* API 密钥 */}
       <APIKeySection />
     </div>
   );
+}
+
+function OIDCIdentitySection({ providerName, linked, hasPassword, passwordLoginEnabled, onChanged }: {
+	providerName: string;
+	linked: boolean;
+	hasPassword: boolean;
+	passwordLoginEnabled: boolean;
+	onChanged: () => Promise<void>;
+}) {
+	const { locale } = useLocale();
+	const [error, setError] = useState("");
+	const [saving, setSaving] = useState(false);
+	const [password, setPassword] = useState("");
+	const isChinese = locale === "zh-CN";
+
+	const startLink = async () => {
+		setSaving(true);
+		setError("");
+		try {
+			if (hasPassword) {
+				await apiClient.post("/api/auth/reauth/password", { password });
+			}
+			const returnTo = window.location.pathname + window.location.search;
+			const form = document.createElement("form");
+			form.method = "POST";
+			form.action = `${apiPath("/api/auth/oidc/link")}?returnTo=${encodeURIComponent(returnTo)}`;
+			document.body.appendChild(form);
+			form.submit();
+		} catch (err) {
+			setError(getAPIErrorMessage(err, isChinese ? "身份确认失败" : "Authentication failed"));
+			setSaving(false);
+		}
+	};
+	const unlink = async () => {
+		setSaving(true);
+		setError("");
+		try {
+			await apiClient.delete("/api/auth/oidc/link");
+			await onChanged();
+		} catch (err) {
+			if (redirectForOIDCReauthentication(err)) return;
+			setError(getAPIErrorMessage(err, isChinese ? "解除绑定失败" : "Failed to unlink identity"));
+		} finally {
+			setSaving(false);
+		}
+	};
+
+	return (
+		<section className="rounded-2xl border border-border/40 bg-card p-5">
+			<div className="flex flex-wrap items-center justify-between gap-3">
+				<div>
+					<h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+						<ShieldCheck className="h-4 w-4 text-accent" />
+						{isChinese ? "外部身份" : "External identity"}
+					</h3>
+					<p className="mt-1 text-xs text-muted">
+						{linked
+							? (isChinese ? `已绑定 ${providerName}` : `Linked to ${providerName}`)
+							: (isChinese ? `绑定 ${providerName} 后可使用单点登录` : `Link ${providerName} to use single sign-on`)}
+					</p>
+				</div>
+				{linked ? (
+					<button type="button" disabled={saving || !hasPassword || !passwordLoginEnabled} onClick={() => void unlink()} className="h-9 rounded-lg border border-red-500/30 px-3 text-xs text-red-400 hover:bg-red-500/10 disabled:opacity-50">
+						{saving ? (isChinese ? "处理中" : "Working") : (isChinese ? "解除绑定" : "Unlink")}
+					</button>
+				) : (
+					<div className="flex items-center gap-2">
+						{hasPassword && <input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={isChinese ? "当前密码" : "Current password"} className="h-9 w-36 rounded-lg border border-border bg-background px-3 text-xs text-foreground focus:border-accent focus:outline-none" />}
+						<button type="button" disabled={saving || (hasPassword && !password)} onClick={() => void startLink()} className="h-9 rounded-lg bg-accent px-3 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50">
+							{saving ? (isChinese ? "处理中" : "Working") : (isChinese ? "绑定身份" : "Link identity")}
+						</button>
+					</div>
+				)}
+			</div>
+			{linked && (!hasPassword || !passwordLoginEnabled) && <p className="mt-3 text-xs text-amber-400">
+				{!passwordLoginEnabled
+					? (isChinese ? "密码登录关闭时不能解除最后一个外部身份。" : "The last external identity cannot be removed while password login is disabled.")
+					: (isChinese ? "请先设置其他登录方式，再解除最后一个外部身份。" : "Add another login method before removing the last external identity.")}
+			</p>}
+			{error && <p className="mt-3 text-xs text-red-400">{error}</p>}
+		</section>
+	);
 }
 
 const apiKeyCopy = {
@@ -146,7 +251,34 @@ const apiKeyCopy = {
   },
 } as const;
 
+type PendingAPIKeyIntent =
+  | { type: "create"; name: string; expiresInDays: number }
+  | { type: "revoke-all" };
+
+const pendingAPIKeyIntentKey = "nowen-reader:oidc:api-key-intent";
+
+function takePendingAPIKeyIntent(): PendingAPIKeyIntent | null {
+  try {
+	if (new URLSearchParams(window.location.search).has("oidc_error")) {
+	  window.sessionStorage.removeItem(pendingAPIKeyIntentKey);
+	  return null;
+	}
+    const raw = window.sessionStorage.getItem(pendingAPIKeyIntentKey);
+    window.sessionStorage.removeItem(pendingAPIKeyIntentKey);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<PendingAPIKeyIntent>;
+    if (value.type === "revoke-all") return { type: "revoke-all" };
+    if (value.type === "create" && typeof value.name === "string" && typeof value.expiresInDays === "number") {
+      return { type: "create", name: value.name, expiresInDays: value.expiresInDays };
+    }
+  } catch {
+    window.sessionStorage.removeItem(pendingAPIKeyIntentKey);
+  }
+  return null;
+}
+
 function APIKeySection() {
+	const { user } = useAuth();
   const { locale } = useLocale();
   const text = apiKeyCopy[locale];
   const [keys, setKeys] = useState<APIKeyRecord[]>([]);
@@ -172,6 +304,26 @@ function APIKeySection() {
   useEffect(() => {
     void loadKeys();
   }, [loadKeys]);
+
+  useEffect(() => {
+    const intent = takePendingAPIKeyIntent();
+    if (!intent) return;
+    void (async () => {
+      setError("");
+      try {
+        if (intent.type === "create") {
+          const response = await createAPIKey({ name: intent.name, expiresInDays: intent.expiresInDays });
+          setCreatedKey(response.key);
+          setCopied(false);
+        } else {
+          await revokeAllAPIKeys();
+        }
+        await loadKeys();
+      } catch (err) {
+        setError(getAPIErrorMessage(err, intent.type === "create" ? text.createFailed : text.revokeAllFailed));
+      }
+    })();
+  }, [loadKeys, text.createFailed, text.revokeAllFailed]);
 
   const activeKeyCount = useMemo(() => {
     const now = Date.now();
@@ -285,6 +437,7 @@ function APIKeySection() {
       {showCreate && (
         <CreateAPIKeyDialog
           text={text}
+		  hasPassword={user?.hasPassword !== false}
           onClose={() => setShowCreate(false)}
           onCreated={async (plaintext) => {
             setShowCreate(false);
@@ -298,6 +451,7 @@ function APIKeySection() {
       {showRevokeAll && (
         <RevokeAllAPIKeysDialog
           text={text}
+		  hasPassword={user?.hasPassword !== false}
           onClose={() => setShowRevokeAll(false)}
           onRevoked={async () => {
             setShowRevokeAll(false);
@@ -340,8 +494,9 @@ function APIKeySection() {
 
 type APIKeyText = (typeof apiKeyCopy)["zh-CN"] | (typeof apiKeyCopy)["en"];
 
-function CreateAPIKeyDialog({ text, onClose, onCreated }: {
+function CreateAPIKeyDialog({ text, hasPassword, onClose, onCreated }: {
   text: APIKeyText;
+	hasPassword: boolean;
   onClose: () => void;
   onCreated: (plaintext: string) => Promise<void>;
 }) {
@@ -356,9 +511,14 @@ function CreateAPIKeyDialog({ text, onClose, onCreated }: {
     setSaving(true);
     setError("");
     try {
-      const response = await createAPIKey({ name: name.trim(), currentPassword: password, expiresInDays });
+	  const response = await createAPIKey({
+		name: name.trim(),
+		currentPassword: hasPassword ? password : undefined,
+		expiresInDays,
+	  });
       await onCreated(response.key);
     } catch (err) {
+	  if (redirectForOIDCReauthentication(err, { type: "create", name: name.trim(), expiresInDays })) return;
       setError(getAPIErrorMessage(err, text.createFailed));
     } finally {
       setSaving(false);
@@ -381,14 +541,14 @@ function CreateAPIKeyDialog({ text, onClose, onCreated }: {
             <option value={0}>{text.noExpiry}</option>
           </select>
         </label>
-        <label className="block text-xs font-medium text-muted">
+		{hasPassword && <label className="block text-xs font-medium text-muted">
           {text.currentPassword}
           <input required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={text.passwordPlaceholder} className="mt-1.5 w-full rounded-lg border border-border bg-background px-3 py-2.5 text-sm text-foreground focus:border-accent focus:outline-none" />
-        </label>
+		</label>}
         {error && <div className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</div>}
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" onClick={onClose} className="h-9 rounded-lg border border-border px-4 text-sm text-foreground hover:bg-foreground/5">{text.cancel}</button>
-          <button type="submit" disabled={saving || !name.trim() || !password} className="inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50">
+		  <button type="submit" disabled={saving || !name.trim() || (hasPassword && !password)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50">
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
             {saving ? text.creating : text.create}
           </button>
@@ -398,8 +558,9 @@ function CreateAPIKeyDialog({ text, onClose, onCreated }: {
   );
 }
 
-function RevokeAllAPIKeysDialog({ text, onClose, onRevoked }: {
+function RevokeAllAPIKeysDialog({ text, hasPassword, onClose, onRevoked }: {
   text: APIKeyText;
+	hasPassword: boolean;
   onClose: () => void;
   onRevoked: () => Promise<void>;
 }) {
@@ -412,9 +573,10 @@ function RevokeAllAPIKeysDialog({ text, onClose, onRevoked }: {
     setSaving(true);
     setError("");
     try {
-      await revokeAllAPIKeys(password);
+	  await revokeAllAPIKeys(hasPassword ? password : undefined);
       await onRevoked();
     } catch (err) {
+	  if (redirectForOIDCReauthentication(err, { type: "revoke-all" })) return;
       setError(getAPIErrorMessage(err, text.revokeAllFailed));
     } finally {
       setSaving(false);
@@ -425,14 +587,14 @@ function RevokeAllAPIKeysDialog({ text, onClose, onRevoked }: {
     <DialogShell title={text.revokeAllTitle} onClose={onClose} closeLabel={text.cancel}>
       <form onSubmit={handleSubmit} className="space-y-4">
         <p className="text-sm text-red-400">{text.revokeAllWarning}</p>
-        <label className="block text-xs font-medium text-muted">
+		{hasPassword && <label className="block text-xs font-medium text-muted">
           {text.currentPassword}
           <input required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={text.passwordPlaceholder} className="mt-1.5 w-full rounded-lg border border-border bg-background px-3 py-2.5 text-sm text-foreground focus:border-accent focus:outline-none" />
-        </label>
+		</label>}
         {error && <div className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</div>}
         <div className="flex justify-end gap-2">
           <button type="button" onClick={onClose} className="h-9 rounded-lg border border-border px-4 text-sm text-foreground hover:bg-foreground/5">{text.cancel}</button>
-          <button type="submit" disabled={saving || !password} className="inline-flex h-9 items-center gap-2 rounded-lg bg-red-500 px-4 text-sm font-medium text-white hover:bg-red-500/90 disabled:opacity-50">
+		  <button type="submit" disabled={saving || (hasPassword && !password)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-red-500 px-4 text-sm font-medium text-white hover:bg-red-500/90 disabled:opacity-50">
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             {text.revokeAllConfirm}
           </button>
@@ -468,6 +630,22 @@ function getAPIErrorMessage(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+function redirectForOIDCReauthentication(error: unknown, intent?: PendingAPIKeyIntent): boolean {
+	if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "reauth_required") {
+		return false;
+	}
+	if (intent) {
+		try {
+			window.sessionStorage.setItem(pendingAPIKeyIntentKey, JSON.stringify(intent));
+		} catch {
+			// Reauthentication can still proceed if browser storage is unavailable.
+		}
+	}
+	const returnTo = window.location.pathname + window.location.search;
+	window.location.assign(`${apiPath("/api/auth/oidc/reauth")}?returnTo=${encodeURIComponent(returnTo)}`);
+	return true;
 }
 
 async function copyText(value: string): Promise<void> {
@@ -585,6 +763,8 @@ function NicknameSection({ onSuccess }: { onSuccess: () => Promise<void> }) {
 
 /* ── 修改密码区域 ── */
 function PasswordSection() {
+	const { user, refreshUser, passwordLoginEnabled } = useAuth();
+  const hasPassword = user?.hasPassword !== false;
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -607,7 +787,7 @@ function PasswordSection() {
     e.preventDefault();
     setMessage(null);
 
-    if (!oldPassword || !newPassword || !confirmPassword) {
+    if ((hasPassword && !oldPassword) || !newPassword || !confirmPassword) {
       setMessage({ type: "error", text: "请填写所有密码字段" });
       return;
     }
@@ -622,27 +802,29 @@ function PasswordSection() {
       return;
     }
 
-    if (oldPassword === newPassword) {
+    if (hasPassword && oldPassword === newPassword) {
       setMessage({ type: "error", text: "新密码不能与旧密码相同" });
       return;
     }
 
     setSaving(true);
     try {
-      const res = await fetch(apiPath("/api/auth/users"), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "changePassword",
-          oldPassword,
-          newPassword,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "修改密码失败");
-      setMessage({ type: "success", text: "密码修改成功" });
+	  if (hasPassword) {
+		const res = await fetch(apiPath("/api/auth/users"), {
+		  method: "PUT",
+		  headers: { "Content-Type": "application/json" },
+		  body: JSON.stringify({ action: "changePassword", oldPassword, newPassword }),
+		});
+		const data = await res.json();
+		if (!res.ok) throw new Error(data.error || "修改密码失败");
+	  } else {
+		await apiClient.post("/api/auth/password", { newPassword });
+		await refreshUser();
+	  }
+      setMessage({ type: "success", text: hasPassword ? "密码修改成功" : "本地密码设置成功" });
       resetForm();
     } catch (err) {
+	  if (!hasPassword && redirectForOIDCReauthentication(err)) return;
       setMessage({ type: "error", text: err instanceof Error ? err.message : "修改密码失败" });
     } finally {
       setSaving(false);
@@ -654,12 +836,17 @@ function PasswordSection() {
       <div className="px-5 py-4 border-b border-border/30">
         <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-accent" />
-          修改密码
+		  {hasPassword ? "修改密码" : "设置本地密码"}
         </h3>
       </div>
       <form onSubmit={handleSubmit} className="p-5 space-y-4">
+		{!hasPassword && <p className="text-xs text-muted">
+		  {passwordLoginEnabled
+			? "设置一个本地应急密码后，即使身份提供方不可用也能登录。"
+			: "本地密码会被安全保留；管理员重新启用密码登录后可用于应急恢复。"}
+		</p>}
         {/* 当前密码 */}
-        <div>
+        {hasPassword && <div>
           <label className="block text-xs font-medium text-muted mb-1.5">当前密码</label>
           <div className="relative">
             <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
@@ -683,7 +870,7 @@ function PasswordSection() {
               {showOld ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
           </div>
-        </div>
+        </div>}
 
         {/* 新密码 */}
         <div>
@@ -757,7 +944,7 @@ function PasswordSection() {
           className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
         >
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
-          修改密码
+		  {hasPassword ? "修改密码" : "设置密码"}
         </button>
       </form>
     </section>

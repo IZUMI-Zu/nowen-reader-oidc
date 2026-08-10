@@ -9,6 +9,18 @@
 | `PORT` | `3000` | HTTP 服务监听端口 |
 | `BASE_PATH` | `/` | 子路径部署前缀（例如 `/reader` 或 `/reader/`，留空或 `/` 为根部署） |
 | `TRUST_PROXY_HEADERS` | `false` | 是否信任 `X-Forwarded-Proto`、`X-Forwarded-Host` 和 `X-Forwarded-Prefix`；仅在可信反向代理后启用 |
+| `TRUSTED_PROXIES` | — | 明确信任的反向代理 IP/CIDR，逗号分隔；默认不信任任何代理 |
+| `PUBLIC_URL` | — | OIDC 对外 origin，例如 `https://reader.example.com`；不包含 `BASE_PATH`、query 或 fragment |
+| `OIDC_ENABLED` | `false` | 显式启用 OpenID Connect 登录 |
+| `OIDC_ISSUER_URL` | — | Provider 的精确 HTTPS issuer URL |
+| `OIDC_CLIENT_ID` | — | NowenReader confidential client ID |
+| `OIDC_CLIENT_SECRET` | — | NowenReader confidential client secret |
+| `OIDC_DISPLAY_NAME` | `OpenID Connect` | 登录页显示的 Provider 名称 |
+| `OIDC_SCOPES` | `openid profile email` | 空格分隔的 OAuth scopes；必须包含 `openid` |
+| `OIDC_DISABLE_PASSWORD_LOGIN` | `false` | 启用 OIDC 后关闭用户名/密码登录和自助注册；配置错误时保持关闭（fail-closed） |
+| `OIDC_AUTO_PROVISION` | `false` | 是否为未知 `(issuer, subject)` 自动创建本地普通用户 |
+| `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` | — | 可成为首个管理员的精确 OIDC subject，逗号分隔；推荐留空并先创建本地管理员 |
+| `OIDC_SESSION_MAX_AGE` | `12h` | OIDC 本地 Session 不可续期突破的绝对时限，范围 `5m`–`720h` |
 | `DATABASE_URL` | `./data/nowen-reader.db` | SQLite 数据库文件路径 |
 | `COMICS_DIR` | `./comics` | 漫画主目录 |
 | `NOVELS_DIR` | `./novels` | 电子书主目录 |
@@ -28,9 +40,10 @@ Docker 中设置 `BASE_PATH=/reader` 后，Web、API、PWA 和 OPDS 都会挂载
 environment:
   - BASE_PATH=/reader
   - TRUST_PROXY_HEADERS=true
+  - TRUSTED_PROXIES=172.18.0.1
 ```
 
-`TRUST_PROXY_HEADERS` 仅应在服务位于可信反向代理后时启用。Nginx 示例：
+`TRUST_PROXY_HEADERS` 只有同时配置 `TRUSTED_PROXIES` 才会生效。Nginx 示例：
 
 ```nginx
 location /reader/ {
@@ -42,6 +55,38 @@ location /reader/ {
 ```
 
 代理必须保留 `/reader` 前缀，不要在转发时将其剥离。配置完成后可通过 `/reader/api/health` 检查服务状态。
+
+## OpenID Connect
+
+完整的 Provider 注册、所有选项、账号迁移、安全关闭密码登录和故障恢复说明见 [OpenID Connect 配置](./OIDC.md)。
+
+先在 Provider 注册固定回调地址：
+
+```text
+PUBLIC_URL + BASE_PATH + /api/auth/oidc/callback
+```
+
+示例：
+
+```yaml
+environment:
+  - PUBLIC_URL=https://reader.example.com
+  - BASE_PATH=/reader
+  - OIDC_ENABLED=true
+  - OIDC_ISSUER_URL=https://identity.example.com/realms/readers
+  - OIDC_CLIENT_ID=nowen-reader
+  - OIDC_CLIENT_SECRET=replace-with-a-secret
+  - OIDC_DISPLAY_NAME=公司账号
+  - OIDC_SCOPES=openid profile email
+  - OIDC_DISABLE_PASSWORD_LOGIN=false
+  - OIDC_AUTO_PROVISION=false
+  - OIDC_BOOTSTRAP_ADMIN_SUBJECTS=
+  - OIDC_SESSION_MAX_AGE=12h
+```
+
+推荐先用本地首次设置创建 break-glass 管理员，再从账户设置显式绑定 OIDC。若必须直接用 OIDC 创建首个管理员，需要同时启用 `OIDC_AUTO_PROVISION=true`，并在 `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` 中填写该 Provider 的精确 `sub`；启用这套安全 bootstrap 后，本地首次管理员注册会关闭，未命中 allowlist 的首个登录也会被拒绝。如需改回本地首次设置，应先关闭 OIDC bootstrap 配置。系统只用已验证的 `(issuer, subject)` 识别账号，不会按 email 或 username 自动合并。
+
+只有在真实 OIDC 登录和管理员身份绑定已经验收后，才应设置 `OIDC_DISABLE_PASSWORD_LOGIN=true`。它会同时关闭 `/api/auth/login`、自助注册和 Web 密码表单，但不会删除本地密码、已有 Session 或 API Key；Session 内的密码 reauth 仍可用于敏感操作。关闭密码登录时不能解除最后一个 OIDC 身份。Provider 故障时将无法创建新登录，恢复方法是把该变量改回 `false` 并重启服务。若 OIDC 配置本身无效，关闭请求仍然保持生效，避免密码入口因配置错误意外重新开放。
 
 ## 站点设置
 
@@ -162,5 +207,6 @@ location /reader/ {
 ## 相关文档
 
 - 📦 [安装指南](./INSTALL.md)
+- 🔐 [OpenID Connect 配置](./OIDC.md)
 - 📚 [常见问题](./FAQ.md)
 - 🛠️ [开发指南](./DEVELOPMENT.md)

@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- **Go 1.23+** — 后端开发
+- **Go 1.25+** — 后端开发
 - **Node.js 20+** — 前端开发
 - **Flutter 3.2+ / Dart 3.2+** — 移动端开发（可选）
 
@@ -119,9 +119,9 @@ nowen-reader/
 ├── docker-compose.yml       # 一键部署（源码构建）
 ├── docker-compose.prod.yml  # 生产部署（Docker Hub 镜像）
 ├── docker-compose.nas.yml   # NAS 部署（群晖 / 威联通 / 绿联 / 铁威马）
-├── Dockerfile               # 多阶段构建（Node 20 → Go 1.23 → Alpine 3.20，约 30 MB）
+├── Dockerfile               # 多阶段构建（Node 20 → Go 1.25 → Alpine 3.20，约 30 MB）
 ├── Makefile                 # 构建自动化（30+ 目标）
-└── go.mod                   # Go 模块（Go 1.23）
+└── go.mod                   # Go 模块（Go 1.25）
 ```
 
 ## 技术栈
@@ -130,7 +130,7 @@ nowen-reader/
 
 | 组件 | 技术 |
 |:---|:---|
-| 语言 | Go 1.23 |
+| 语言 | Go 1.25 |
 | Web 框架 | Gin v1.10 |
 | 数据库 | SQLite（`modernc.org/sqlite`，纯 Go 实现，零 CGO） |
 | 全文搜索 | SQLite FTS5 |
@@ -171,7 +171,7 @@ nowen-reader/
 
 | 组件 | 技术 |
 |:---|:---|
-| 容器化 | Docker 多阶段构建（Node 20 / Go 1.23 / Alpine 3.20，约 30 MB） |
+| 容器化 | Docker 多阶段构建（Node 20 / Go 1.25 / Alpine 3.20，约 30 MB） |
 | 多平台 | amd64 + arm64（Docker Buildx） |
 | CI/CD | GitHub Actions（测试 / 构建 / Docker / Release / SSH 部署） |
 | PWA | Service Worker + `manifest.json` |

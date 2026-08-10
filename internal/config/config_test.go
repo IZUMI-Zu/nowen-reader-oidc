@@ -32,6 +32,25 @@ func TestDataDir(t *testing.T) {
 	}
 }
 
+func TestTrustedProxiesAreExplicitAndValidated(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "")
+	proxies, err := GetTrustedProxies()
+	if err != nil || proxies != nil {
+		t.Fatalf("default trusted proxies = %#v, %v; want nil, nil", proxies, err)
+	}
+
+	t.Setenv("TRUSTED_PROXIES", "127.0.0.1, 10.0.0.0/8, ::1")
+	proxies, err = GetTrustedProxies()
+	if err != nil || len(proxies) != 3 {
+		t.Fatalf("GetTrustedProxies() = %#v, %v", proxies, err)
+	}
+
+	t.Setenv("TRUSTED_PROXIES", "all-proxies")
+	if _, err := GetTrustedProxies(); err == nil {
+		t.Fatal("invalid trusted proxy entry was accepted")
+	}
+}
+
 func TestGetComicsDir(t *testing.T) {
 	// Reset cache
 	siteConfigCache = nil
@@ -206,9 +225,9 @@ func TestExtraComicsDirsDedup(t *testing.T) {
 		ComicsDir: "/comics/main",
 		ExtraComicsDirs: []string{
 			"/comics/extra1",
-			"/comics/main", // duplicate of main dir
+			"/comics/main",   // duplicate of main dir
 			"/comics/extra1", // duplicate
-			"  ", // empty/whitespace
+			"  ",             // empty/whitespace
 			"/comics/extra2",
 		},
 	}

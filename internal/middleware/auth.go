@@ -12,14 +12,16 @@ import (
 )
 
 const (
-	SessionCookie = "nowen_session"
-	SessionMaxAge = 30 * 24 * 60 * 60 // 30 days in seconds
+	SessionCookie              = "nowen_session"
+	SessionMaxAge              = 30 * 24 * 60 * 60 // 30 days in seconds
+	RecentAuthenticationWindow = 10 * time.Minute
 )
 
 // contextKey constants
 const (
 	ContextKeyUser       = "auth_user"
 	ContextKeyCredential = "auth_credential"
+	ContextKeySession    = "auth_session"
 )
 
 type CredentialType string
@@ -88,6 +90,36 @@ func SessionRequired() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// RequireRecentAuthentication protects credential-changing operations. It
+// must run after SessionRequired and is satisfied by either a fresh password
+// login or a completed OIDC reauthentication transaction.
+func RequireRecentAuthentication(maxAge time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := GetCurrentSession(c)
+		if session == nil {
+			_ = getCurrentSessionUser(c)
+			session = GetCurrentSession(c)
+		}
+		if !SessionAuthenticationIsRecent(session, maxAge, time.Now().UTC()) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "Recent authentication required", "code": "reauth_required",
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
+// SessionAuthenticationIsRecent centralizes the recent-authentication clock
+// policy so handlers and middleware cannot drift apart.
+func SessionAuthenticationIsRecent(session *model.UserSession, maxAge time.Duration, now time.Time) bool {
+	if session == nil || session.AuthenticatedAt.IsZero() {
+		return false
+	}
+	age := now.Sub(session.AuthenticatedAt)
+	return age >= -2*time.Minute && age <= maxAge
 }
 
 // AdminRequired is a middleware that requires an admin user.
@@ -201,6 +233,17 @@ func GetCurrentCredential(c *gin.Context) *RequestCredential {
 	return &result
 }
 
+// GetCurrentSession returns the local browser session selected for this
+// request. It is nil for API-key credentials.
+func GetCurrentSession(c *gin.Context) *model.UserSession {
+	value, exists := c.Get(ContextKeySession)
+	if !exists {
+		return nil
+	}
+	session, _ := value.(*model.UserSession)
+	return session
+}
+
 func getCurrentSessionUser(c *gin.Context) *model.AuthUser {
 	if user := getContextUser(c); user != nil {
 		credential := GetCurrentCredential(c)
@@ -226,8 +269,10 @@ func getCurrentSessionUser(c *gin.Context) *model.AuthUser {
 		return nil
 	}
 
-	// Check expiration
-	if session.ExpiresAt.Before(time.Now()) {
+	now := time.Now().UTC()
+	// Check both the sliding expiry and the non-renewable absolute boundary used
+	// by federated sessions.
+	if !session.ExpiresAt.After(now) || (session.AbsoluteExpiresAt != nil && !session.AbsoluteExpiresAt.After(now)) {
 		// Clean up expired session
 		_ = store.DeleteSession(token)
 		return nil
@@ -235,14 +280,25 @@ func getCurrentSessionUser(c *gin.Context) *model.AuthUser {
 
 	// 自动续期：当 Session 剩余有效期不足 7 天时，自动延长到 30 天
 	const renewThreshold = 7 * 24 * time.Hour
-	if time.Until(session.ExpiresAt) < renewThreshold {
-		newExpiry := time.Now().Add(time.Duration(SessionMaxAge) * time.Second)
-		if err := store.RenewSession(token, newExpiry); err == nil {
-			SetSessionCookie(c, token)
+	if session.ExpiresAt.Sub(now) < renewThreshold {
+		newExpiry := now.Add(time.Duration(SessionMaxAge) * time.Second)
+		if session.AbsoluteExpiresAt != nil && session.AbsoluteExpiresAt.Before(newExpiry) {
+			newExpiry = *session.AbsoluteExpiresAt
+		}
+		if newExpiry.After(session.ExpiresAt) && store.RenewSession(token, newExpiry) == nil {
+			maxAge := int(newExpiry.Sub(now).Seconds())
+			secure := session.AuthMethod == model.SessionAuthMethodOIDC
+			if secure {
+				if oidcConfig, err := config.GetOIDCConfig(); err == nil {
+					secure = oidcConfig.SecureCookies
+				}
+			}
+			SetSessionCookieWithOptions(c, token, maxAge, secure)
 		}
 	}
 
 	authUser := authUserFromModel(user)
+	c.Set(ContextKeySession, session)
 	setAuthenticatedUser(c, authUser, RequestCredential{Type: CredentialSession, ID: session.ID})
 	return authUser
 }
@@ -262,11 +318,12 @@ func setAuthenticatedUser(c *gin.Context, user *model.AuthUser, credential Reque
 
 func authUserFromModel(user *model.User) *model.AuthUser {
 	return &model.AuthUser{
-		ID:        user.ID,
-		Username:  user.Username,
-		Nickname:  user.Nickname,
-		Role:      user.Role,
-		AiEnabled: user.AiEnabled,
+		ID:          user.ID,
+		Username:    user.Username,
+		Nickname:    user.Nickname,
+		Role:        user.Role,
+		AiEnabled:   user.AiEnabled,
+		HasPassword: user.Password != "",
 	}
 }
 
@@ -286,9 +343,16 @@ func IsRequestSecure(c *gin.Context) bool {
 // 2. Flutter App (dio_cookie_manager) 在 HTTP 连接时不会发送 Secure Cookie
 // 3. httpOnly=true 已经提供了足够的 XSS 防护
 func SetSessionCookie(c *gin.Context, token string) {
+	SetSessionCookieWithOptions(c, token, SessionMaxAge, false)
+}
+
+// SetSessionCookieWithOptions issues a local session cookie with an explicit
+// lifetime and Secure policy. OIDC uses the externally configured HTTPS origin;
+// legacy LAN/password sessions preserve their current HTTP compatibility.
+func SetSessionCookieWithOptions(c *gin.Context, token string, maxAge int, secure bool) {
 	c.SetSameSite(http.SameSiteLaxMode)
 	cookiePath := config.BasePath()
-	c.SetCookie(SessionCookie, token, SessionMaxAge, cookiePath, "", false, true)
+	c.SetCookie(SessionCookie, token, maxAge, cookiePath, "", secure, true)
 }
 
 // ClearSessionCookie removes the session cookie.

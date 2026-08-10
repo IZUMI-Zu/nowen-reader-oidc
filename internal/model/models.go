@@ -2,6 +2,11 @@ package model
 
 import "time"
 
+const (
+	SessionAuthMethodPassword = "password"
+	SessionAuthMethodOIDC     = "oidc"
+)
+
 // ============================================================
 // User System
 // ============================================================
@@ -19,18 +24,36 @@ type User struct {
 
 // AuthUser is the safe user representation returned to clients.
 type AuthUser struct {
-	ID        string `json:"id"`
-	Username  string `json:"username"`
-	Nickname  string `json:"nickname"`
-	Role      string `json:"role"`
-	AiEnabled bool   `json:"aiEnabled"`
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	Nickname    string `json:"nickname"`
+	Role        string `json:"role"`
+	AiEnabled   bool   `json:"aiEnabled"`
+	HasPassword bool   `json:"hasPassword"`
 }
 
 type UserSession struct {
-	ID        string    `json:"id"` // uuid token
-	UserID    string    `json:"userId"`
-	ExpiresAt time.Time `json:"expiresAt"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID                string     `json:"id"` // uuid token
+	UserID            string     `json:"userId"`
+	ExpiresAt         time.Time  `json:"expiresAt"`
+	AuthMethod        string     `json:"authMethod"`
+	AuthenticatedAt   time.Time  `json:"authenticatedAt"`
+	AbsoluteExpiresAt *time.Time `json:"absoluteExpiresAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+}
+
+// ExternalIdentity maps an OIDC (issuer, subject) pair to the existing local
+// authorization identity. Email and display name are profile metadata only.
+type ExternalIdentity struct {
+	ID            string    `json:"id"`
+	UserID        string    `json:"userId"`
+	Issuer        string    `json:"issuer"`
+	Subject       string    `json:"subject"`
+	Email         string    `json:"email"`
+	EmailVerified bool      `json:"emailVerified"`
+	DisplayName   string    `json:"displayName"`
+	CreatedAt     time.Time `json:"createdAt"`
+	LastLoginAt   time.Time `json:"lastLoginAt"`
 }
 
 // APIKey is a revocable authentication credential owned by a user. SecretHash

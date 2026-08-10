@@ -85,7 +85,7 @@ docker compose up -d
 
 > For non-Docker environments or developers needing customization.
 
-**Prerequisites**: Go 1.23+, Node.js 20+ (optional, only required for frontend builds)
+**Prerequisites**: Go 1.25+, Node.js 20+ (optional, only required for frontend builds)
 
 ```bash
 git clone https://github.com/cropflre/nowen-reader.git

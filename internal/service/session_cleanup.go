@@ -32,4 +32,12 @@ func cleanExpiredSessions() {
 	if count > 0 {
 		log.Printf("[session-cleanup] Cleaned %d expired sessions", count)
 	}
+	transactionCount, err := store.DeleteExpiredOIDCLoginTransactions(time.Now().UTC())
+	if err != nil {
+		log.Printf("[session-cleanup] Error cleaning OIDC transactions: %v", err)
+		return
+	}
+	if transactionCount > 0 {
+		log.Printf("[session-cleanup] Cleaned %d expired or consumed OIDC transactions", transactionCount)
+	}
 }

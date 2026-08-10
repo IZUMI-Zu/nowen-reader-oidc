@@ -3,6 +3,8 @@ package middleware
 import (
 	"fmt"
 	"log"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,8 +15,7 @@ import (
 func RequestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
-		path := c.Request.URL.Path
-		raw := c.Request.URL.RawQuery
+		path := requestPathForLog(c.Request.URL)
 
 		// Process request
 		c.Next()
@@ -25,10 +26,6 @@ func RequestLogger() gin.HandlerFunc {
 		method := c.Request.Method
 		clientIP := c.ClientIP()
 		size := c.Writer.Size()
-
-		if raw != "" {
-			path = path + "?" + raw
-		}
 
 		// Color-code status
 		statusColor := colorForStatus(status)
@@ -43,6 +40,30 @@ func RequestLogger() gin.HandlerFunc {
 			size,
 		)
 	}
+}
+
+func requestPathForLog(requestURL *url.URL) string {
+	path := requestURL.Path
+	if requestURL.RawQuery == "" {
+		return path
+	}
+	// Authorization responses carry short-lived credentials and correlation
+	// values. Dropping the whole callback query is safer than maintaining a list
+	// of every Provider-specific parameter.
+	if strings.HasSuffix(path, "/api/auth/oidc/callback") {
+		return path + "?[REDACTED]"
+	}
+	values, err := url.ParseQuery(requestURL.RawQuery)
+	if err != nil {
+		return path + "?[INVALID_QUERY]"
+	}
+	for key := range values {
+		switch strings.ToLower(key) {
+		case "code", "state", "id_token", "access_token", "client_secret":
+			values.Set(key, "[REDACTED]")
+		}
+	}
+	return path + "?" + values.Encode()
 }
 
 // ANSI color codes

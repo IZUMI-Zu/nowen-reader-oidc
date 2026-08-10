@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
+	"github.com/nowen-reader/nowen-reader/internal/model"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -46,11 +47,6 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Name must be 1-64 characters"})
 		return
 	}
-	if req.CurrentPassword == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Current password is required"})
-		return
-	}
-
 	days := 365
 	if req.ExpiresInDays != nil {
 		days = *req.ExpiresInDays
@@ -66,8 +62,7 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.CurrentPassword)) != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Current password is incorrect"})
+	if !authorizeCredentialChange(c, user, req.CurrentPassword) {
 		return
 	}
 
@@ -106,8 +101,8 @@ func (h *APIKeyHandler) RevokeAll(c *gin.Context) {
 	var req struct {
 		CurrentPassword string `json:"currentPassword"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.CurrentPassword == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Current password is required"})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -117,8 +112,7 @@ func (h *APIKeyHandler) RevokeAll(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.CurrentPassword)) != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Current password is incorrect"})
+	if !authorizeCredentialChange(c, user, req.CurrentPassword) {
 		return
 	}
 
@@ -128,6 +122,34 @@ func (h *APIKeyHandler) RevokeAll(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"revokedCount": count})
+}
+
+// authorizeCredentialChange accepts either a fresh browser authentication or
+// a correctly supplied local password. OIDC-only users reauthenticate through
+// /api/auth/oidc/reauth and never need a synthetic password.
+func authorizeCredentialChange(c *gin.Context, user *model.User, currentPassword string) bool {
+	session := middleware.GetCurrentSession(c)
+	if currentPassword != "" {
+		if user.Password == "" || bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(currentPassword)) != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Current password is incorrect"})
+			return false
+		}
+		now := time.Now().UTC()
+		if session == nil || store.MarkSessionAuthenticated(session.ID, now) != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to refresh authentication"})
+			return false
+		}
+		session.AuthenticatedAt = now
+		return true
+	}
+	if middleware.SessionAuthenticationIsRecent(session, middleware.RecentAuthenticationWindow, time.Now().UTC()) {
+		return true
+	}
+	c.JSON(http.StatusUnauthorized, gin.H{
+		"error": "Recent authentication required",
+		"code":  "reauth_required",
+	})
+	return false
 }
 
 // AdminList handles GET /api/admin/users/:id/api-keys.

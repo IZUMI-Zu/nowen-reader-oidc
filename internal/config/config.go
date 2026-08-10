@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -685,7 +686,68 @@ func BasePath() string {
 func TrustProxyHeaders() bool {
 	value := strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS"))
 	trusted, err := strconv.ParseBool(value)
-	return err == nil && trusted
+	return err == nil && trusted && strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")) != ""
+}
+
+// GetTrustedProxies returns explicit IP/CIDR entries accepted by Gin. The
+// default is nil (trust no proxies); wildcard names are deliberately rejected.
+func GetTrustedProxies() ([]string, error) {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if raw == "" {
+		return nil, nil
+	}
+	var proxies []string
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if net.ParseIP(entry) == nil {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q", entry)
+			}
+		}
+		proxies = append(proxies, entry)
+	}
+	if len(proxies) == 0 {
+		return nil, nil
+	}
+	return proxies, nil
+}
+
+// TrustProxyHeadersFrom reports whether forwarding headers on a request from
+// remoteAddr may be consumed by application code. Gin's trusted-proxy setting
+// does not protect handlers that read X-Forwarded-* directly, so those handlers
+// must use this check as well.
+func TrustProxyHeadersFrom(remoteAddr string) bool {
+	if !TrustProxyHeaders() {
+		return false
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	remoteIP := net.ParseIP(strings.Trim(host, "[]"))
+	if remoteIP == nil {
+		return false
+	}
+	proxies, err := GetTrustedProxies()
+	if err != nil {
+		return false
+	}
+	for _, proxy := range proxies {
+		if ip := net.ParseIP(proxy); ip != nil {
+			if ip.Equal(remoteIP) {
+				return true
+			}
+			continue
+		}
+		_, network, err := net.ParseCIDR(proxy)
+		if err == nil && network.Contains(remoteIP) {
+			return true
+		}
+	}
+	return false
 }
 
 // JoinBasePath joins the BasePath with a relative or absolute subpath.

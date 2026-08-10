@@ -458,6 +458,10 @@ const zhCN = {
     password: "密码",
     nickname: "昵称 (可选)",
     login: "登录",
+	loginWith: "使用 {provider} 登录",
+	or: "或者",
+	oidcError: "单点登录未完成，请重试。",
+	noLoginMethods: "当前没有可用的登录方式，请联系管理员。",
     register: "注册",
     logout: "退出登录",
     settings: "设置",
@@ -1766,6 +1770,10 @@ export interface Translations {
     password: string;
     nickname: string;
     login: string;
+	loginWith: string;
+	or: string;
+	oidcError: string;
+	noLoginMethods: string;
     register: string;
     logout: string;
     settings: string;

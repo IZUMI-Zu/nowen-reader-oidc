@@ -15,6 +15,7 @@ interface ApiError {
   status: number;
   message: string;
   raw?: unknown;
+	code?: string;
 }
 
 // Auth is handled via session cookie (credentials: "include"), no token needed.
@@ -61,16 +62,22 @@ async function request<T = unknown>(
 
     if (!res.ok) {
       let errorMessage = `HTTP ${res.status}`;
+	  let errorBody: Record<string, unknown> | undefined;
       try {
-        const errorBody = await res.json();
-        errorMessage = errorBody.error || errorBody.message || errorMessage;
+		errorBody = await res.json() as Record<string, unknown>;
       } catch {
         // 无法解析 JSON 错误体
       }
+	  if (errorBody) {
+		const candidate = errorBody.error ?? errorBody.message;
+		if (typeof candidate === "string") errorMessage = candidate;
+	  }
 
       const error: ApiError = {
         status: res.status,
         message: errorMessage,
+		code: typeof errorBody?.code === "string" ? errorBody.code : undefined,
+		raw: errorBody,
       };
       throw error;
     }

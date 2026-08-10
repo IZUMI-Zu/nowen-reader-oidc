@@ -2,13 +2,16 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	oidcauth "github.com/nowen-reader/nowen-reader/internal/auth/oidc"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/model"
 	"github.com/nowen-reader/nowen-reader/internal/store"
@@ -30,6 +33,47 @@ func performCredentialRequest(r *gin.Engine, method, path string, body any, cook
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
+}
+
+func TestOIDCOnlyUserCanCreateAPIKeyWithRecentAuthentication(t *testing.T) {
+	r := setupTestRouter(t)
+	_ = registerAndLogin(t, r)
+	identity := oidcauth.VerifiedIdentity{
+		Issuer: "https://identity.example.com", Subject: "api-key-user", PreferredUsername: "oidc-reader",
+	}
+	user, _, err := store.ResolveOIDCLogin(context.Background(), identity, store.OIDCProvisionPolicy{AutoProvision: true})
+	if err != nil {
+		t.Fatalf("ResolveOIDCLogin() error = %v", err)
+	}
+	if user.Password != "" {
+		t.Fatal("test user unexpectedly has a local password")
+	}
+	if err := store.CreateSession(&model.UserSession{
+		ID: "recent-oidc-session", UserID: user.ID, ExpiresAt: time.Now().Add(time.Hour),
+		AuthMethod: "oidc", AuthenticatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	recent := performAuthedRequest(r, http.MethodPost, "/api/auth/api-keys", map[string]any{
+		"name": "OPDS reader", "expiresInDays": 30,
+	}, "recent-oidc-session")
+	if recent.Code != http.StatusCreated {
+		t.Fatalf("recent OIDC API key status = %d, want 201: %s", recent.Code, recent.Body.String())
+	}
+
+	if err := store.CreateSession(&model.UserSession{
+		ID: "stale-oidc-session", UserID: user.ID, ExpiresAt: time.Now().Add(time.Hour),
+		AuthMethod: "oidc", AuthenticatedAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateSession(stale) error = %v", err)
+	}
+	stale := performAuthedRequest(r, http.MethodPost, "/api/auth/api-keys", map[string]any{
+		"name": "stale", "expiresInDays": 30,
+	}, "stale-oidc-session")
+	if stale.Code != http.StatusUnauthorized || !strings.Contains(stale.Body.String(), "reauth_required") {
+		t.Fatalf("stale OIDC API key status = %d, want reauthentication 401: %s", stale.Code, stale.Body.String())
+	}
 }
 
 func createAPIKeyForTest(t *testing.T, r *gin.Engine, cookie, password string) (string, string) {

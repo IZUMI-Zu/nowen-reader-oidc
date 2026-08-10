@@ -60,6 +60,19 @@ services:
       # - BASE_PATH=/reader
       # 仅在可信反向代理后启用，用于 OPDS 生成正确的外部地址
       # - TRUST_PROXY_HEADERS=true
+      # - TRUSTED_PROXIES=172.18.0.1
+      # OIDC（可选）：先在 Provider 注册 PUBLIC_URL + BASE_PATH + /api/auth/oidc/callback
+      # - PUBLIC_URL=https://reader.example.com
+      # - OIDC_ENABLED=true
+      # - OIDC_ISSUER_URL=https://identity.example.com/realms/readers
+      # - OIDC_CLIENT_ID=nowen-reader
+      # - OIDC_CLIENT_SECRET=replace-with-a-secret
+      # - OIDC_DISPLAY_NAME=公司账号
+      # - OIDC_SCOPES=openid profile email
+      # - OIDC_DISABLE_PASSWORD_LOGIN=false
+      # - OIDC_AUTO_PROVISION=false
+      # - OIDC_BOOTSTRAP_ADMIN_SUBJECTS=
+      # - OIDC_SESSION_MAX_AGE=12h
       # 文件权限映射（设置为你 NAS/宿主机文件的 UID:GID，解决 permission denied 问题）
       # 可通过 ls -ln 查看文件的 UID/GID，然后填入下方
       # - PUID=1000

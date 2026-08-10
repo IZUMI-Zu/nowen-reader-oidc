@@ -85,7 +85,7 @@ docker compose up -d
 
 > 适用于不使用 Docker 的环境，或需要定制化构建的开发者。
 
-**前置条件**：Go 1.23+，Node.js 20+（可选，仅构建前端需要）
+**前置条件**：Go 1.25+，Node.js 20+（可选，仅构建前端需要）
 
 ```bash
 git clone https://github.com/cropflre/nowen-reader.git

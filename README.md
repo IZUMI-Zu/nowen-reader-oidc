@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/github/stars/cropflre/nowen-reader?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/docker/pulls/cropflre/nowen-reader?style=flat-square" alt="Docker Pulls" />
   <img src="https://img.shields.io/docker/image-size/cropflre/nowen-reader/latest?style=flat-square" alt="Image Size" />
-  <img src="https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go" alt="Go" />
+  <img src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&logo=go" alt="Go" />
   <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react" alt="React" />
 </p>
 
@@ -85,6 +85,7 @@ docker compose -f docker-compose.prod.yml up -d
 |:---|:---|
 | [安装指南](./docs/INSTALL.md) | 5 种部署方式：Docker Hub、NAS、源码构建、二进制、Docker Compose |
 | [配置说明](./docs/CONFIGURATION.md) | 环境变量、站点设置、AI 配置、扫描器参数、支持格式 |
+| [OpenID Connect 配置](./docs/OIDC.md) | Provider 注册、账号绑定、关闭密码登录、安全恢复与故障排查 |
 | [API 文档](./docs/API.md) | 完整的 RESTful API 参考 |
 | [开发指南](./docs/DEVELOPMENT.md) | 前置条件、项目结构、Makefile 命令、技术栈、CI/CD |
 | [常见问题](./docs/FAQ.md) | 部署、权限、缩略图、PDF、AI、OPDS 等常见问题 |
@@ -146,7 +147,7 @@ docker compose -f docker-compose.prod.yml up -d
 
 ## 🛠️ 技术栈
 
-- **后端**：Go 1.23 · Gin · SQLite (`modernc.org/sqlite`) · FTS5 · fsnotify · go:embed
+- **后端**：Go 1.25 · Gin · SQLite (`modernc.org/sqlite`) · FTS5 · fsnotify · go:embed
 - **前端**：React 19 · Vite 6 · TypeScript 5 · Tailwind CSS v4 · React Router v7 · PDF.js
 - **移动端**：Flutter 3.x · Riverpod 2.x · GoRouter · Dio · Material 3
 - **部署**：Docker 多阶段构建（约 30 MB） · amd64 + arm64 · GitHub Actions CI/CD

@@ -253,6 +253,9 @@ export interface BatchScrapePreviewItem {
     language?: string;
     genre?: string;
     coverUrl?: string;
+    externalRating?: number;
+    externalRatingMax?: number;
+    externalRatingSource?: string;
     source: string;
   };
   applied: boolean;
@@ -278,6 +281,7 @@ export const BATCH_SCRAPE_FIELDS = [
   { id: "year", label: "年份" },
   { id: "cover", label: "封面" },
   { id: "tags", label: "标签" },
+  { id: "rating", label: "外部评分" },
 ] as const;
 
 /* ── 完整状态接口 ── */

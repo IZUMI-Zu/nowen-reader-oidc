@@ -170,7 +170,7 @@ chmod 600 .env
 | `thumb` | 封面 URL |
 | `rating` | 5 分制外部评分 |
 
-插件还会附加一个 `source:https://.../g/{gid}/{token}` 标签，保留精确来源。封面只接受 EH 官方 HTTPS 图片域名；其他主机的 URL 会被丢弃。
+插件还会附加一个 `source:https://.../g/{gid}/{token}` 标签，保留精确来源。再次应用其他 EH/EX 画廊时，旧的 EH/EX `source:` 标签会被替换，避免下次搜索继续命中过期画廊。封面只接受 EH 官方 HTTPS 图片域名；其他主机的 URL 会被丢弃。
 
 ## 限流与网络安全
 
@@ -185,6 +185,8 @@ chmod 600 .env
 - 每个 gallery 最多接收 256 个标签，并限制标题、标签和封面 URL 长度；
 - 最多跟随 5 次重定向；
 - 生产请求只允许 EH、EX 和 EH API 的固定 HTTPS origin；
+- EH 封面在写入前以及每次重定向后都会重新校验官方 HTTPS 图片域名，不允许跳转到内网或其他主机；
+- 浏览器请求取消后，排队中的 EH/EX 限流等待和进行中的 EH/EX HTTP 请求也会取消，不会继续占用未来请求槽；
 - 不记录 Cookie、完整响应、gallery 搜索词或包含远端 URL 的底层错误；
 - 429、登录页、Sad Panda、临时封禁、无效 token 和异常响应都会停止本次查询。
 

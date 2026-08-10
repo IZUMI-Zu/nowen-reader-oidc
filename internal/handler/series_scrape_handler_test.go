@@ -104,10 +104,25 @@ func TestApplySeriesScrapedMetadata(t *testing.T) {
 		t.Fatalf("comic-library series content type = %q", detail.Series.ContentType)
 	}
 	if got := filterSeriesMetadataSources(
-		[]string{"googlebooks", "anilist_novel", "bangumi", "bangumi"},
+		[]string{"googlebooks", "anilist_novel", "bangumi", "ehentai", "bangumi"},
 		detail.Series.ContentType,
-	); !reflect.DeepEqual(got, []string{"bangumi"}) {
+	); !reflect.DeepEqual(got, []string{"bangumi", "ehentai"}) {
 		t.Fatalf("filtered comic sources = %#v", got)
+	}
+	if got := filterSeriesMetadataSources([]string{"ehentai"}, "novel"); len(got) != 0 {
+		t.Fatalf("EH source must not be accepted for novels: %#v", got)
+	}
+	if got := mergeMetadataTags(
+		[]string{"artist:old", "source:http://e-hentai.org/g/1/0123456789"},
+		[]string{"artist:new", "source:https://exhentai.org/g/2/abcdef0123"},
+	); !reflect.DeepEqual(got, []string{"artist:old", "artist:new", "source:https://exhentai.org/g/2/abcdef0123"}) {
+		t.Fatalf("merged metadata tags = %#v", got)
+	}
+	if got := resolveBatchMetadataSources([]string{"ehentai"}, "comic", true); !reflect.DeepEqual(got, []string{"ehentai"}) {
+		t.Fatalf("explicit batch EH selection was not preserved: %#v", got)
+	}
+	if got := resolveBatchMetadataSources([]string{"ehentai"}, "novel", true); len(got) != 0 {
+		t.Fatalf("batch EH selection must be rejected for novels: %#v", got)
 	}
 	if !detail.Series.MetadataLocked || detail.Series.ManualLocked {
 		t.Fatalf("unexpected metadata/structure locks: %#v", detail.Series)

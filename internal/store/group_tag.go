@@ -105,8 +105,9 @@ func SyncGroupTagsToVolumes(groupID int) (totalVolumes, syncedVolumes, tagsCount
 	tagsCount = len(tagNames)
 
 	// 为每本漫画添加缺少的标签
+	replaceMatcher := ehentaiTagReplacementMatcher(tagNames)
 	for _, comic := range group.Comics {
-		if e := AddTagsToComic(comic.ComicID, tagNames); e != nil {
+		if e := AddTagsToComicReplacingMatching(comic.ComicID, tagNames, replaceMatcher); e != nil {
 			log.Printf("[SyncGroupTags] 同步漫画 %s 标签失败: %v", comic.ComicID, e)
 			continue
 		}

@@ -42,6 +42,9 @@ func TestEHentaiSettingsAreAdminOnlyAndNeverReturnSecrets(t *testing.T) {
 	if configured, _ := body["credentialsConfigured"].(bool); !configured {
 		t.Fatalf("masked credential status missing: %s", response.Body.String())
 	}
+	if forcedLanguage, ok := body["forcedLanguage"].(string); !ok || forcedLanguage != "" {
+		t.Fatalf("settings response omitted the empty forcedLanguage field required by WebUI: %s", response.Body.String())
+	}
 
 	response = performAuthedRequest(r, http.MethodPut, "/api/metadata/ehentai/settings", map[string]any{
 		"enabled":             true,

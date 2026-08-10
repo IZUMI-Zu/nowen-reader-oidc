@@ -77,8 +77,9 @@ func SyncSeriesTagsToItems(seriesID string) (total, synced, tagsCount int, err e
 	for _, tag := range tags {
 		names = append(names, tag.Name)
 	}
+	replaceMatcher := ehentaiTagReplacementMatcher(names)
 	for _, comicID := range ids {
-		if err := AddTagsToComic(comicID, names); err == nil {
+		if err := AddTagsToComicReplacingMatching(comicID, names, replaceMatcher); err == nil {
 			synced++
 		}
 	}

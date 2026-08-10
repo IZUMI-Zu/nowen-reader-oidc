@@ -73,7 +73,7 @@ func (h *MetadataHandler) Search(c *gin.Context) {
 		}
 	}
 
-	results := service.SearchMetadataWithOptions(query, sources, lang, options, contentType)
+	results := service.SearchMetadataWithOptionsContext(c.Request.Context(), query, sources, lang, options, contentType)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}

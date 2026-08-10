@@ -4,8 +4,9 @@ import (
 	"crypto/md5"
 	"database/sql"
 	"fmt"
-
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -457,6 +458,125 @@ func AddTagsToComic(comicID string, tagNames []string) error {
 		}
 	}
 	return nil
+}
+
+// AddTagsToComicReplacingMatching atomically removes existing comic tags
+// selected by shouldReplace before adding the new tag set. A narrow matcher
+// lets metadata providers replace their own singular identity while preserving
+// user tags and identities owned by other providers.
+func AddTagsToComicReplacingMatching(comicID string, tagNames []string, shouldReplace func(string) bool) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var removedTagIDs []int
+	if shouldReplace != nil {
+		rows, err := tx.Query(`
+			SELECT t."id", t."name"
+			FROM "ComicTag" ct
+			JOIN "Tag" t ON t."id" = ct."tagId"
+			WHERE ct."comicId" = ?
+		`, comicID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var tagID int
+			var name string
+			if err := rows.Scan(&tagID, &name); err != nil {
+				rows.Close()
+				return err
+			}
+			if shouldReplace(name) {
+				removedTagIDs = append(removedTagIDs, tagID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, tagID := range removedTagIDs {
+			if _, err := tx.Exec(`DELETE FROM "ComicTag" WHERE "comicId" = ? AND "tagId" = ?`, comicID, tagID); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, rawName := range tagNames {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO "Tag" ("name") VALUES (?) ON CONFLICT("name") DO NOTHING`, name); err != nil {
+			return err
+		}
+		var tagID int
+		if err := tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO "ComicTag" ("comicId", "tagId") VALUES (?, ?) ON CONFLICT DO NOTHING`, comicID, tagID); err != nil {
+			return err
+		}
+	}
+
+	for _, tagID := range removedTagIDs {
+		if _, err := tx.Exec(`DELETE FROM "Tag" WHERE "id" = ? AND NOT EXISTS (SELECT 1 FROM "ComicTag" WHERE "tagId" = ?)`, tagID, tagID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func ehentaiTagReplacementMatcher(tagNames []string) func(string) bool {
+	for _, name := range tagNames {
+		if IsEHentaiGallerySourceTag(name) {
+			return IsEHentaiGallerySourceTag
+		}
+	}
+	return nil
+}
+
+// IsEHentaiGallerySourceTag reports whether tag is exactly an E-Hentai or
+// ExHentai gallery identity. It intentionally does not match the whole
+// source: namespace, which may contain identities from other providers.
+func IsEHentaiGallerySourceTag(tag string) bool {
+	name, value, ok := strings.Cut(strings.TrimSpace(tag), ":")
+	if !ok || !strings.EqualFold(strings.TrimSpace(name), "source") {
+		return false
+	}
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "http://") {
+		value = "https://" + value[len("http://"):]
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "e-hentai.org" && host != "exhentai.org" {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	if len(parts) != 3 || parts[0] != "g" || len(parts[2]) != 10 {
+		return false
+	}
+	if gid, err := strconv.ParseInt(parts[1], 10, 64); err != nil || gid <= 0 {
+		return false
+	}
+	for _, char := range parts[2] {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
+			return false
+		}
+	}
+	return true
 }
 
 // RemoveTagFromComic 从漫画移除标签，清理孤立标签。

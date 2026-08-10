@@ -2136,6 +2136,16 @@ export default function ScraperPage() {
                                 <span className="text-foreground/70 line-clamp-1">{item.metadata.description}</span>
                               </div>
                             )}
+                            {item.metadata.externalRating != null && groupBatchScrapeFields.has("rating") && (
+                              <div className="flex gap-1.5">
+                                <span className="text-muted/50 w-10 flex-shrink-0">评分</span>
+                                <span className="text-foreground/70">
+                                  {item.metadata.externalRating}
+                                  {item.metadata.externalRatingMax != null && ` / ${item.metadata.externalRatingMax}`}
+                                  {item.metadata.externalRatingSource && ` (${item.metadata.externalRatingSource})`}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         )}
                         {!item.success && item.error && (

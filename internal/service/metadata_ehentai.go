@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nowen-reader/nowen-reader/internal/config"
+	"github.com/nowen-reader/nowen-reader/internal/store"
 	xhtml "golang.org/x/net/html"
 )
 
@@ -92,26 +93,38 @@ func (l *ehIntervalLimiter) Wait(ctx context.Context) error {
 	if l == nil || l.interval <= 0 {
 		return nil
 	}
-	l.mu.Lock()
-	now := l.now()
-	slot := now
-	if l.next.After(slot) {
-		slot = l.next
-	}
-	l.next = slot.Add(l.interval)
-	l.mu.Unlock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		l.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			l.mu.Unlock()
+			return err
+		}
+		now := l.now()
+		wait := l.next.Sub(now)
+		if wait <= 0 {
+			l.next = now.Add(l.interval)
+			l.mu.Unlock()
+			return nil
+		}
+		l.mu.Unlock()
 
-	wait := slot.Sub(now)
-	if wait <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+			// Competing waiters re-check the next slot instead of reserving an
+			// unbounded queue of future slots.
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		}
 	}
 }
 
@@ -120,13 +133,19 @@ func (l *ehIntervalLimiter) Wait(ctx context.Context) error {
 // to a sanitized log entry, matching the behavior of the other metadata
 // sources without exposing account cookies, response bodies, or search terms.
 func SearchEHentai(query, lang string) []ComicMetadata {
-	return SearchEHentaiWithTags(query, lang, nil)
+	return SearchEHentaiWithTagsContext(context.Background(), query, lang, nil)
 }
 
 // SearchEHentaiWithTags uses trusted, already-stored archive tags as optional
 // hints. A valid source tag bypasses title search; an ASCII artist tag narrows
 // the EH query without changing what is sent to other metadata providers.
 func SearchEHentaiWithTags(query, lang string, existingTags []string) []ComicMetadata {
+	return SearchEHentaiWithTagsContext(context.Background(), query, lang, existingTags)
+}
+
+// SearchEHentaiWithTagsContext cancels queued rate-limit waits and in-flight
+// requests when the originating HTTP request is canceled.
+func SearchEHentaiWithTagsContext(ctx context.Context, query, lang string, existingTags []string) []ComicMetadata {
 	cfg, err := config.GetEHentaiConfig()
 	if err != nil {
 		log.Printf("[metadata] E-Hentai source unavailable: %s", safeEHError(err))
@@ -140,7 +159,7 @@ func SearchEHentaiWithTags(query, lang string, existingTags []string) []ComicMet
 		log.Printf("[metadata] E-Hentai source unavailable: %s", safeEHError(err))
 		return nil
 	}
-	results, err := provider.searchWithTags(context.Background(), query, lang, existingTags)
+	results, err := provider.searchWithTags(ctx, query, lang, existingTags)
 	if err != nil {
 		log.Printf("[metadata] E-Hentai search failed: %s", safeEHError(err))
 		return nil
@@ -351,6 +370,13 @@ func galleryRefFromEHTags(tags []string) (ehGalleryRef, bool) {
 	return ehGalleryRef{}, false
 }
 
+// IsEHentaiGallerySourceTag reports whether a stored tag is an exact EH/EX
+// gallery source. It is used when applying a new result so stale gallery
+// identities are replaced instead of accumulating.
+func IsEHentaiGallerySourceTag(tag string) bool {
+	return store.IsEHentaiGallerySourceTag(tag)
+}
+
 func artistFromEHTags(tags []string) string {
 	for _, tag := range tags {
 		name, value, ok := strings.Cut(strings.TrimSpace(tag), ":")
@@ -491,7 +517,7 @@ func (p *ehentaiProvider) prepareRequest(req *http.Request, accept string) {
 
 func parseEHGalleryURL(raw string) (ehGalleryRef, bool) {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
 		return ehGalleryRef{}, false
 	}
 	host := strings.ToLower(u.Hostname())
@@ -817,7 +843,7 @@ func safeEHCoverURL(raw string) string {
 		return ""
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Host == "" {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Host == "" || u.Port() != "" && u.Port() != "443" {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())

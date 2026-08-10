@@ -96,7 +96,7 @@ let state: ScraperState = {
   groupBatchScrapeDialogOpen: false,
   groupBatchScrapeMode: "online" as const,
   groupBatchScrapeFields: new Set([
-    "author", "description", "genre", "publisher", "language", "year", "cover", "tags",
+    "author", "description", "genre", "publisher", "language", "year", "cover", "tags", "rating",
   ]),
   groupBatchScrapeOverwrite: true,
   groupBatchScrapeSyncTags: true,

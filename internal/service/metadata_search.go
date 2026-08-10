@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"strings"
 )
 
@@ -22,12 +23,23 @@ type MetadataSearchOptions struct {
 // SearchMetadata searches multiple sources concurrently.
 // contentType: "comic" | "novel" | "" (auto-detect default sources).
 func SearchMetadata(query string, sources []string, lang string, contentType ...string) []ComicMetadata {
-	return SearchMetadataWithOptions(query, sources, lang, MetadataSearchOptions{}, contentType...)
+	return SearchMetadataWithOptionsContext(context.Background(), query, sources, lang, MetadataSearchOptions{}, contentType...)
 }
 
 // SearchMetadataWithOptions searches multiple sources with optional
 // provider-specific hints.
 func SearchMetadataWithOptions(query string, sources []string, lang string, options MetadataSearchOptions, contentType ...string) []ComicMetadata {
+	return SearchMetadataWithOptionsContext(context.Background(), query, sources, lang, options, contentType...)
+}
+
+// SearchMetadataWithContext propagates request cancellation to sources that
+// support it, including EH/EX rate-limit waits and HTTP requests.
+func SearchMetadataWithContext(ctx context.Context, query string, sources []string, lang string, contentType ...string) []ComicMetadata {
+	return SearchMetadataWithOptionsContext(ctx, query, sources, lang, MetadataSearchOptions{}, contentType...)
+}
+
+// SearchMetadataWithOptionsContext is the context-aware search entry point.
+func SearchMetadataWithOptionsContext(ctx context.Context, query string, sources []string, lang string, options MetadataSearchOptions, contentType ...string) []ComicMetadata {
 	ct := ""
 	if len(contentType) > 0 {
 		ct = contentType[0]
@@ -45,7 +57,7 @@ func SearchMetadataWithOptions(query string, sources []string, lang string, opti
 	}
 
 	// 主搜索
-	all := doSearch(query, sources, lang, options)
+	all := doSearch(ctx, query, sources, lang, options)
 
 	// 多重查询策略：如果主搜索结果为空或质量不佳，尝试清洗后的查询
 	cleanedQuery := CleanTitle(query)
@@ -53,11 +65,11 @@ func SearchMetadataWithOptions(query string, sources []string, lang string, opti
 	if len(retrySources) > 0 && cleanedQuery != "" && cleanedQuery != query && len(cleanedQuery) >= 2 {
 		if len(all) == 0 {
 			// 主搜索无结果，用清洗后查询重新搜索
-			all = doSearch(cleanedQuery, retrySources, lang, options)
+			all = doSearch(ctx, cleanedQuery, retrySources, lang, options)
 		} else {
 			// 主搜索有结果但不多，用清洗后查询补充搜索并合并
 			if len(all) < 3 {
-				extra := doSearch(cleanedQuery, retrySources, lang, options)
+				extra := doSearch(ctx, cleanedQuery, retrySources, lang, options)
 				all = mergeResults(all, extra)
 			}
 		}
@@ -83,7 +95,7 @@ func metadataRetrySources(sources []string, options MetadataSearchOptions) []str
 }
 
 // doSearch 执行并行搜索
-func doSearch(query string, sources []string, lang string, options MetadataSearchOptions) []ComicMetadata {
+func doSearch(ctx context.Context, query string, sources []string, lang string, options MetadataSearchOptions) []ComicMetadata {
 	type result struct {
 		data []ComicMetadata
 	}
@@ -91,6 +103,10 @@ func doSearch(query string, sources []string, lang string, options MetadataSearc
 	ch := make(chan result, len(sources))
 	for _, src := range sources {
 		go func(s string) {
+			if ctx.Err() != nil {
+				ch <- result{}
+				return
+			}
 			switch s {
 			case "anilist":
 				ch <- result{SearchAniList(query, lang)}
@@ -109,7 +125,7 @@ func doSearch(query string, sources []string, lang string, options MetadataSearc
 			case "googlebooks":
 				ch <- result{SearchGoogleBooks(query, lang)}
 			case "ehentai":
-				ch <- result{SearchEHentaiWithTags(query, lang, options.EHentaiExistingTags)}
+				ch <- result{SearchEHentaiWithTagsContext(ctx, query, lang, options.EHentaiExistingTags)}
 			default:
 				ch <- result{}
 			}

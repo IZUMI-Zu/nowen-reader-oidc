@@ -17,6 +17,9 @@ interface MetadataResult {
   genre?: string;
   seriesName?: string;
   coverUrl?: string;
+  externalRating?: number;
+  externalRatingMax?: number;
+  externalRatingSource?: string;
   source: string;
 }
 
@@ -324,6 +327,12 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
                   {result.description && (
                     <div className="text-xs text-muted mt-1 line-clamp-2">
                       {result.description}
+                    </div>
+                  )}
+                  {result.externalRating != null && (
+                    <div className="text-xs text-muted">
+                      {t.metadata?.externalRating || "External rating"}: {result.externalRating}
+                      {result.externalRatingMax != null ? `/${result.externalRatingMax}` : ""}
                     </div>
                   )}
                   {result.genre && (

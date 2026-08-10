@@ -103,6 +103,8 @@ credentials make the source unavailable instead of falling back silently.
   search queries.
 - Accept only fixed HTTPS origins for production requests.
 - Refuse redirects outside the E-Hentai family of hosts and cap redirects.
+- Revalidate EH cover hosts on the initial URL and every redirect before any
+  image response is downloaded.
 - Validate cookie length and characters before creating a request.
 - Apply timeouts and bounded response readers for both HTML and JSON.
 - Enforce a process-wide search-page interval of at least four seconds.
@@ -111,6 +113,8 @@ credentials make the source unavailable instead of falling back silently.
 - Treat login pages, the ExHentai sad-panda response, temporary bans, rate
   limits, invalid gallery tokens, and malformed responses as explicit errors.
 - Keep the source opt-in and admin-gated through the existing scraper routes.
+- Propagate request cancellation through EH rate-limit waits and HTTP calls
+  without pre-reserving an unbounded queue of future limiter slots.
 
 ## No-live-request test policy
 

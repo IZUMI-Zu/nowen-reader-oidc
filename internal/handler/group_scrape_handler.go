@@ -63,7 +63,12 @@ func (h *GroupHandler) ScrapeMetadata(c *gin.Context) {
 		ct = detectGroupContentType(group)
 	}
 
-	results := service.SearchMetadata(query, body.Sources, body.Lang, ct)
+	sources := filterSeriesMetadataSources(body.Sources, ct)
+	if len(body.Sources) > 0 && len(sources) == 0 {
+		c.JSON(http.StatusOK, gin.H{"results": []service.ComicMetadata{}, "detectedContentType": ct})
+		return
+	}
+	results := service.SearchMetadataWithContext(c.Request.Context(), query, sources, body.Lang, ct)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}
@@ -112,6 +117,12 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 
 	shouldApply := func(field string) bool {
 		return applyAll || fieldsSet[field]
+	}
+	if meta.CoverURL != "" && shouldApply("cover") {
+		if err := service.ValidateMetadataCoverURL(meta.Source, meta.CoverURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "封面地址不符合所选元数据源的安全规则"})
+			return
+		}
 	}
 
 	update := store.GroupMetadataUpdate{}
@@ -175,19 +186,11 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 		genres := splitAndTrim(meta.Genre)
 		if len(genres) > 0 {
 			existingTags, _ := store.GetGroupTags(id)
-			existingNames := make(map[string]bool)
+			existingNames := make([]string, 0, len(existingTags))
 			for _, t := range existingTags {
-				existingNames[t.Name] = true
+				existingNames = append(existingNames, t.Name)
 			}
-			allNames := make([]string, 0)
-			for _, t := range existingTags {
-				allNames = append(allNames, t.Name)
-			}
-			for _, g := range genres {
-				if !existingNames[g] {
-					allNames = append(allNames, g)
-				}
-			}
+			allNames := mergeMetadataTags(existingNames, genres)
 			_ = store.SetGroupTags(id, allNames)
 			if body.SyncTags && allowMemberSync {
 				_, _, _, _ = store.SyncGroupTagsToVolumes(id)
@@ -197,7 +200,7 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 
 	// 下载封面
 	if meta.CoverURL != "" && shouldApply("cover") {
-		go service.DownloadGroupCover(id, meta.CoverURL)
+		go service.DownloadGroupCover(id, meta.CoverURL, meta.Source)
 	}
 
 	// 同步元数据到所有卷
@@ -468,6 +471,41 @@ func splitAndTrim(s string) []string {
 		if p != "" {
 			result = append(result, p)
 		}
+	}
+	return result
+}
+
+func mergeMetadataTags(existing, incoming []string) []string {
+	replaceEHSource := false
+	for _, name := range incoming {
+		if service.IsEHentaiGallerySourceTag(name) {
+			replaceEHSource = true
+			break
+		}
+	}
+
+	result := make([]string, 0, len(existing)+len(incoming))
+	seen := make(map[string]struct{}, len(existing)+len(incoming))
+	appendUnique := func(name string) {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, name)
+	}
+	for _, name := range existing {
+		if replaceEHSource && service.IsEHentaiGallerySourceTag(name) {
+			continue
+		}
+		appendUnique(name)
+	}
+	for _, name := range incoming {
+		appendUnique(name)
 	}
 	return result
 }

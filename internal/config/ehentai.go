@@ -31,7 +31,7 @@ type EHentaiSettings struct {
 	Site                string `json:"site"`
 	PreferOriginalTitle bool   `json:"preferOriginalTitle"`
 	SearchExpunged      bool   `json:"searchExpunged"`
-	ForcedLanguage      string `json:"forcedLanguage,omitempty"`
+	ForcedLanguage      string `json:"forcedLanguage"`
 }
 
 // EHentaiConfig contains server-side configuration for the optional

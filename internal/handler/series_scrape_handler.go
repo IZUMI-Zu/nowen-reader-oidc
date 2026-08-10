@@ -47,8 +47,13 @@ func (h *SeriesHandler) ScrapeMetadata(c *gin.Context) {
 		body.Lang = "zh"
 	}
 	body.ContentType = detectSeriesContentType(detail)
+	requestedSources := append([]string(nil), body.Sources...)
 	body.Sources = filterSeriesMetadataSources(body.Sources, body.ContentType)
-	results := service.SearchMetadata(body.Query, body.Sources, body.Lang, body.ContentType)
+	if len(requestedSources) > 0 && len(body.Sources) == 0 {
+		c.JSON(http.StatusOK, gin.H{"results": []service.ComicMetadata{}, "detectedContentType": body.ContentType})
+		return
+	}
+	results := service.SearchMetadataWithContext(c.Request.Context(), body.Query, body.Sources, body.Lang, body.ContentType)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}
@@ -80,6 +85,12 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 	applyAll := len(fields) == 0
 	shouldApply := func(field string) bool { return applyAll || fields[field] }
 	meta := body.Metadata
+	if meta.CoverURL != "" && shouldApply("cover") {
+		if err := service.ValidateMetadataCoverURL(meta.Source, meta.CoverURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "封面地址不符合所选元数据源的安全规则"})
+			return
+		}
+	}
 	update := store.SeriesMetadataUpdate{}
 	metadataChanged := false
 
@@ -138,17 +149,10 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 	if meta.Genre != "" && shouldApply("tags") {
 		existing, _ := store.GetSeriesTags(detail.Series.ID)
 		names := make([]string, 0, len(existing))
-		seen := make(map[string]struct{}, len(existing))
 		for _, tag := range existing {
 			names = append(names, tag.Name)
-			seen[tag.Name] = struct{}{}
 		}
-		for _, name := range splitAndTrim(meta.Genre) {
-			if _, exists := seen[name]; !exists {
-				names = append(names, name)
-				seen[name] = struct{}{}
-			}
-		}
+		names = mergeMetadataTags(names, splitAndTrim(meta.Genre))
 		if err := store.SetSeriesTags(detail.Series.ID, names); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "保存目录作品标签失败"})
 			return
@@ -158,7 +162,7 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 		}
 	}
 	if meta.CoverURL != "" && shouldApply("cover") {
-		go service.DownloadSeriesCover(detail.Series.ID, meta.CoverURL)
+		go service.DownloadSeriesCover(detail.Series.ID, meta.CoverURL, meta.Source)
 	}
 
 	var syncSuccess, syncErrors int
@@ -276,6 +280,7 @@ func filterSeriesMetadataSources(sources []string, contentType string) []string 
 		"mangadex":      contentType == "comic",
 		"mangaupdates":  contentType == "comic",
 		"kitsu":         contentType == "comic",
+		"ehentai":       contentType == "comic",
 		"googlebooks":   contentType == "novel",
 		"bangumi_novel": contentType == "novel",
 		"anilist_novel": contentType == "novel",

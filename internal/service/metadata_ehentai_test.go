@@ -13,8 +13,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nowen-reader/nowen-reader/internal/config"
+	"github.com/nowen-reader/nowen-reader/internal/store"
 )
 
 type ehRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -421,6 +423,87 @@ func TestEHentaiMetadataRejectsUntrustedCoverHost(t *testing.T) {
 	}
 	if meta.CoverURL != "" {
 		t.Fatalf("untrusted cover URL was retained: %q", meta.CoverURL)
+	}
+}
+
+func TestEHentaiRateLimiterCancellationDoesNotReserveAnotherSlot(t *testing.T) {
+	limiter := newEHIntervalLimiter(time.Hour)
+	canceled, cancelImmediately := context.WithCancel(context.Background())
+	cancelImmediately()
+	if err := limiter.Wait(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("free limiter accepted canceled context: %v", err)
+	}
+	if !limiter.next.IsZero() {
+		t.Fatalf("canceled free-slot waiter reserved %v", limiter.next)
+	}
+	if err := limiter.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reserved := limiter.next
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := limiter.Wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait() error = %v, want context canceled", err)
+	}
+	if !limiter.next.Equal(reserved) {
+		t.Fatalf("canceled waiter moved next slot from %v to %v", reserved, limiter.next)
+	}
+}
+
+func TestEHentaiCoverRedirectPolicyRejectsLeavingOfficialImageHosts(t *testing.T) {
+	if err := ValidateMetadataCoverURL(config.EHentaiSitePublic, "https://127.0.0.1/admin"); err == nil {
+		t.Fatal("untrusted initial EH cover URL was accepted")
+	}
+	policy := metadataCoverRedirectPolicy(config.EHentaiSitePublic)
+	trusted, _ := http.NewRequest(http.MethodGet, "https://ul.ehgt.org/g/fixture.jpg", nil)
+	if err := policy(trusted, []*http.Request{{}}); err != nil {
+		t.Fatalf("trusted redirect rejected: %v", err)
+	}
+	untrusted, _ := http.NewRequest(http.MethodGet, "https://127.0.0.1/admin", nil)
+	if err := policy(untrusted, []*http.Request{{}}); err == nil {
+		t.Fatal("redirect outside EH image hosts was accepted")
+	}
+	port, _ := http.NewRequest(http.MethodGet, "https://ehgt.org:8443/fixture.jpg", nil)
+	if err := policy(port, []*http.Request{{}}); err == nil {
+		t.Fatal("non-standard EH image port was accepted")
+	}
+	if got := metadataCoverPolicySource("", "https://ul.ehgt.org/g/persisted.jpg"); got != config.EHentaiSitePublic {
+		t.Fatalf("persisted EH cover did not restore strict redirect policy: %q", got)
+	}
+}
+
+func TestApplyEHentaiMetadataReplacesStaleGallerySourceTag(t *testing.T) {
+	setupTestDB(t)
+	if _, err := store.DB().Exec(`
+		INSERT INTO "Comic" ("id", "filename", "title")
+		VALUES ('eh-source-replace', 'fixture.cbz', 'Fixture')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	oldSource := "source:http://e-hentai.org/g/1/0123456789"
+	if err := store.AddTagsToComic("eh-source-replace", []string{oldSource, "artist:fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	newSource := "source:https://exhentai.org/g/2/abcdef0123"
+	if _, err := ApplyMetadata("eh-source-replace", ComicMetadata{
+		Title:  "Updated",
+		Genre:  "artist:updated, " + newSource,
+		Source: config.EHentaiSiteRestricted,
+	}, "en", true); err != nil {
+		t.Fatal(err)
+	}
+	comic, err := store.GetComicByID("eh-source-replace")
+	if err != nil || comic == nil {
+		t.Fatalf("GetComicByID() error = %v", err)
+	}
+	var sources []string
+	for _, tag := range comic.Tags {
+		if IsEHentaiGallerySourceTag(tag.Name) {
+			sources = append(sources, tag.Name)
+		}
+	}
+	if len(sources) != 1 || sources[0] != newSource {
+		t.Fatalf("EH source tags = %#v, want only %q", sources, newSource)
 	}
 }
 

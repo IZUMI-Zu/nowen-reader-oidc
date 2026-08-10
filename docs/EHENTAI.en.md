@@ -170,7 +170,7 @@ chmod 600 .env
 | `thumb` | Cover URL |
 | `rating` | External rating out of 5 |
 
-The plugin also adds a `source:https://.../g/{gid}/{token}` tag to preserve the exact source. Covers are accepted only from official EH HTTPS image hosts.
+The plugin also adds a `source:https://.../g/{gid}/{token}` tag to preserve the exact source. Applying another EH/EX gallery replaces the previous EH/EX `source:` tag so later lookups cannot keep resolving to stale gallery data. Covers are accepted only from official EH HTTPS image hosts.
 
 ## Rate limiting and network security
 
@@ -185,6 +185,8 @@ Additional controls:
 - at most 256 tags per gallery, with title, tag, and cover URL length limits;
 - no more than five redirects;
 - fixed production HTTPS origins for EH, EX, and the EH API;
+- EH cover hosts are revalidated before storage and after every redirect; redirects to private networks or other hosts are rejected;
+- canceling the browser request cancels queued EH/EX rate-limit waits and in-flight EH/EX requests without reserving future request slots;
 - no logging of cookies, full responses, gallery queries, or low-level errors containing remote URLs;
 - immediate failure on 429, login pages, Sad Panda, temporary bans, invalid tokens, and malformed responses.
 

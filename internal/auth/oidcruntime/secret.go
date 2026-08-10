@@ -22,6 +22,8 @@ const (
 	secretKeyBytes        = 32
 )
 
+var errInvalidSecretKey = errors.New("key file must contain 32 raw bytes or their base64 encoding")
+
 type AESGCMSecretProtector struct {
 	aead       cipher.AEAD
 	keyID      string
@@ -101,6 +103,8 @@ func readOrCreateLocalSecretKey(path string) ([]byte, error) {
 			return nil, fmt.Errorf("protect local OIDC configuration key: %w", chmodErr)
 		}
 		return key, nil
+	} else if errors.Is(err, errInvalidSecretKey) {
+		return readConcurrentlyCreatedSecretKey(path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read local OIDC configuration key: %w", err)
 	}
@@ -151,6 +155,9 @@ func readConcurrentlyCreatedSecretKey(path string) ([]byte, error) {
 		if err == nil {
 			return key, nil
 		}
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errInvalidSecretKey) {
+			return nil, fmt.Errorf("read concurrently created local OIDC configuration key: %w", err)
+		}
 		if attempt+1 < attempts {
 			time.Sleep(delay)
 		}
@@ -178,5 +185,5 @@ func readSecretKey(path string) ([]byte, error) {
 			return decoded, nil
 		}
 	}
-	return nil, fmt.Errorf("key file must contain 32 raw bytes or their base64 encoding")
+	return nil, errInvalidSecretKey
 }

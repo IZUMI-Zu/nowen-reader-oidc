@@ -66,6 +66,38 @@ func TestReadConcurrentlyCreatedSecretKeyWaitsForCompleteFile(t *testing.T) {
 	}
 }
 
+func TestReadOrCreateLocalSecretKeyWaitsWhenCreatedFileIsIncomplete(t *testing.T) {
+	keyValue := []byte("0123456789abcdef0123456789abcdef")
+	for name, prefixLength := range map[string]int{"empty": 0, "partial": 8} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "oidc-config.key")
+			file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Write(keyValue[:prefixLength]); err != nil {
+				t.Fatal(err)
+			}
+			written := make(chan error, 1)
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				_, writeErr := file.Write(keyValue[prefixLength:])
+				if writeErr == nil {
+					writeErr = file.Close()
+				}
+				written <- writeErr
+			}()
+			key, readErr := readOrCreateLocalSecretKey(path)
+			if err := <-written; err != nil {
+				t.Fatal(err)
+			}
+			if readErr != nil || string(key) != string(keyValue) {
+				t.Fatalf("readOrCreateLocalSecretKey() = %q, %v", key, readErr)
+			}
+		})
+	}
+}
+
 func TestFileSecretProtectorUsesExternalOrProtectedLocalKey(t *testing.T) {
 	t.Run("external base64 key", func(t *testing.T) {
 		dir := t.TempDir()

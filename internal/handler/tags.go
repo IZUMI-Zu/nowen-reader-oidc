@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
 
@@ -15,9 +16,29 @@ func NewTagHandler() *TagHandler {
 	return &TagHandler{}
 }
 
-// GET /api/tags — List all tags
+// GET /api/tags — List tags visible to the current user. Administrators retain
+// the global view used by Tag Manager; readers only see tags attached to
+// content in libraries they can access.
 func (h *TagHandler) ListTags(c *gin.Context) {
-	tags, err := store.GetAllTags()
+	user := middleware.GetCurrentUser(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
+	var (
+		tags []store.TagWithCount
+		err  error
+	)
+	if user.Role == "admin" {
+		tags, err = store.GetAllTags()
+	} else {
+		var libraryIDs []string
+		libraryIDs, err = store.GetUserAccessibleLibraryIDs(user.ID)
+		if err == nil {
+			tags, err = store.GetTagsForLibraries(libraryIDs)
+		}
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tags"})
 		return

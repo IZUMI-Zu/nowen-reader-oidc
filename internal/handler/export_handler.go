@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
 
@@ -22,7 +23,12 @@ func NewExportHandler() *ExportHandler {
 
 // ExportJSON 导出所有阅读数据为JSON格式。
 func (h *ExportHandler) ExportJSON(c *gin.Context) {
-	data, err := collectExportData(getUserID(c))
+	user := middleware.GetCurrentUser(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+	data, err := collectExportData(user.ID, user.Role == "admin")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -170,7 +176,7 @@ func (h *ExportHandler) ExportComicsCSV(c *gin.Context) {
 }
 
 // collectExportData 收集完整的导出数据。
-func collectExportData(userID string) (map[string]interface{}, error) {
+func collectExportData(userID string, isAdmin bool) (map[string]interface{}, error) {
 	data := make(map[string]interface{})
 	data["exportedAt"] = time.Now().UTC().Format(time.RFC3339)
 	data["version"] = "1.0"
@@ -202,8 +208,13 @@ func collectExportData(userID string) (map[string]interface{}, error) {
 		data["readingStats"] = stats
 	}
 
-	// 标签
-	tags, err := store.GetAllTags()
+	// 标签：管理员导出全局视图；普通用户只导出可访问书库的标签。
+	var tags []store.TagWithCount
+	if isAdmin {
+		tags, err = store.GetAllTags()
+	} else {
+		tags, err = store.GetTagsForLibraries(libraryIDs)
+	}
 	if err == nil {
 		data["tags"] = tags
 	}

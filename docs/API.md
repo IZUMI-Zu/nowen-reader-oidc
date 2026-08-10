@@ -685,6 +685,7 @@ Content-Type: application/json
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
 | GET/POST | `/api/metadata/search` | 搜索元数据 |
+| GET/PUT | `/api/metadata/ehentai/settings` | EH/EX 非敏感设置与脱敏凭据状态 🔒管理员 |
 | POST | `/api/metadata/apply` | 应用元数据 |
 | POST | `/api/metadata/scan` | 扫描 ComicInfo.xml |
 | POST | `/api/metadata/novel-scan` | 扫描小说元数据 |

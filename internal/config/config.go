@@ -29,6 +29,7 @@ type SiteConfig struct {
 	ScannerConfig    *ScannerConfig   `json:"scannerConfig,omitempty"`
 	RegistrationMode string           `json:"registrationMode,omitempty"` // "open" | "invite" | "closed"，默认 "open"
 	ScraperEnabled   *bool            `json:"scraperEnabled,omitempty"`   // 是否启用内容刮削功能，默认 false
+	EHentai          *EHentaiSettings `json:"ehentai,omitempty"`          // EH/EX 非敏感设置；账号 Cookie 只从环境变量读取
 	ScanRules        *ScanRulesConfig `json:"scanRules,omitempty"`        // 扫描期统一规则（AI 识别 + 自动归类等）
 
 	// PdfRendererPath 指定 PDF 渲染外部工具所在目录或具体可执行文件路径。

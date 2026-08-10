@@ -9,6 +9,12 @@ var (
 	defaultNovelMetadataSources = []string{"googlebooks", "anilist_novel", "bangumi_novel"}
 )
 
+// MetadataSearchOptions carries source-specific context that must not be folded
+// into the shared query sent to unrelated providers.
+type MetadataSearchOptions struct {
+	EHentaiExistingTags []string
+}
+
 // ============================================================
 // Unified search (parallel)
 // ============================================================
@@ -16,6 +22,12 @@ var (
 // SearchMetadata searches multiple sources concurrently.
 // contentType: "comic" | "novel" | "" (auto-detect default sources).
 func SearchMetadata(query string, sources []string, lang string, contentType ...string) []ComicMetadata {
+	return SearchMetadataWithOptions(query, sources, lang, MetadataSearchOptions{}, contentType...)
+}
+
+// SearchMetadataWithOptions searches multiple sources with optional
+// provider-specific hints.
+func SearchMetadataWithOptions(query string, sources []string, lang string, options MetadataSearchOptions, contentType ...string) []ComicMetadata {
 	ct := ""
 	if len(contentType) > 0 {
 		ct = contentType[0]
@@ -33,18 +45,19 @@ func SearchMetadata(query string, sources []string, lang string, contentType ...
 	}
 
 	// 主搜索
-	all := doSearch(query, sources, lang)
+	all := doSearch(query, sources, lang, options)
 
 	// 多重查询策略：如果主搜索结果为空或质量不佳，尝试清洗后的查询
 	cleanedQuery := CleanTitle(query)
-	if cleanedQuery != "" && cleanedQuery != query && len(cleanedQuery) >= 2 {
+	retrySources := metadataRetrySources(sources, options)
+	if len(retrySources) > 0 && cleanedQuery != "" && cleanedQuery != query && len(cleanedQuery) >= 2 {
 		if len(all) == 0 {
 			// 主搜索无结果，用清洗后查询重新搜索
-			all = doSearch(cleanedQuery, sources, lang)
+			all = doSearch(cleanedQuery, retrySources, lang, options)
 		} else {
 			// 主搜索有结果但不多，用清洗后查询补充搜索并合并
 			if len(all) < 3 {
-				extra := doSearch(cleanedQuery, sources, lang)
+				extra := doSearch(cleanedQuery, retrySources, lang, options)
 				all = mergeResults(all, extra)
 			}
 		}
@@ -56,8 +69,21 @@ func SearchMetadata(query string, sources []string, lang string, contentType ...
 	return all
 }
 
+func metadataRetrySources(sources []string, options MetadataSearchOptions) []string {
+	if _, hasExactEHSource := galleryRefFromEHTags(options.EHentaiExistingTags); !hasExactEHSource {
+		return sources
+	}
+	retry := make([]string, 0, len(sources))
+	for _, source := range sources {
+		if source != "ehentai" {
+			retry = append(retry, source)
+		}
+	}
+	return retry
+}
+
 // doSearch 执行并行搜索
-func doSearch(query string, sources []string, lang string) []ComicMetadata {
+func doSearch(query string, sources []string, lang string, options MetadataSearchOptions) []ComicMetadata {
 	type result struct {
 		data []ComicMetadata
 	}
@@ -83,7 +109,7 @@ func doSearch(query string, sources []string, lang string) []ComicMetadata {
 			case "googlebooks":
 				ch <- result{SearchGoogleBooks(query, lang)}
 			case "ehentai":
-				ch <- result{SearchEHentai(query, lang)}
+				ch <- result{SearchEHentaiWithTags(query, lang, options.EHentaiExistingTags)}
 			default:
 				ch <- result{}
 			}

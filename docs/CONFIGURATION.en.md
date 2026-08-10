@@ -21,14 +21,10 @@ English · [简体中文](./CONFIGURATION.md)
 | `OIDC_AUTO_PROVISION` | `false` | Automatically create a local regular user for an unknown `(issuer, subject)` |
 | `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` | — | Exact OIDC subjects allowed to become the first admin; prefer a local break-glass admin instead |
 | `OIDC_SESSION_MAX_AGE` | `12h` | Non-renewable absolute lifetime for local OIDC sessions, from `5m` to `720h` |
-| `EHENTAI_ENABLED` | `false` | Explicitly enable the optional E-Hentai / ExHentai metadata source |
-| `EHENTAI_SITE` | `ehentai` | Metadata search site: `ehentai` or `exhentai` |
 | `EHENTAI_IPB_MEMBER_ID` | — | Optional account cookie; required for ExHentai and paired with the pass hash |
 | `EHENTAI_IPB_PASS_HASH` | — | Optional account cookie; environment-only and never committed to Git |
 | `EHENTAI_STAR` | — | Optional `star` cookie |
 | `EHENTAI_IGNEOUS` | — | Optional `igneous` cookie |
-| `EHENTAI_PREFER_ORIGINAL_TITLE` | `false` | Prefer the gallery's original title |
-| `EHENTAI_SEARCH_EXPUNGED` | `false` | Include expunged galleries in title search |
 | `DATABASE_URL` | `./data/nowen-reader.db` | SQLite database file path |
 | `COMICS_DIR` | `./comics` | Manga main directory |
 | `NOVELS_DIR` | `./novels` | Novels main directory |
@@ -98,7 +94,7 @@ Set `OIDC_DISABLE_PASSWORD_LOGIN=true` only after validating a real OIDC login a
 
 ## E-Hentai / ExHentai metadata
 
-See [E-Hentai / ExHentai Metadata Plugin](./EHENTAI.en.md) for public EH, authenticated EX, cookie security, field mapping, rate limits, and troubleshooting. This source is disabled and unselected by default and reads metadata only; it does not download gallery content.
+See [E-Hentai / ExHentai Metadata Plugin](./EHENTAI.en.md) for the WebUI switch, public EH, authenticated EX, cookie security, field mapping, rate limits, and troubleshooting. Administrators manage enablement, site, title preference, expunged search, and language restriction in the WebUI; environment variables store cookies only. The source is disabled and unselected by default and reads metadata only.
 
 ## Site Settings
 
@@ -117,6 +113,13 @@ Modify via the **Settings** panel in the web UI, or edit `{DATA_DIR}/site-config
   "language": "zh-CN",
   "theme": "dark",
   "registrationMode": "open",
+  "ehentai": {
+    "enabled": false,
+    "site": "ehentai",
+    "preferOriginalTitle": false,
+    "searchExpunged": false,
+    "forcedLanguage": ""
+  },
   "scannerConfig": {
     "syncCooldownSec": 30,
     "fsDebounceMs": 2000,

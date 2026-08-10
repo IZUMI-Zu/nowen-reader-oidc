@@ -21,14 +21,10 @@
 | `OIDC_AUTO_PROVISION` | `false` | 是否为未知 `(issuer, subject)` 自动创建本地普通用户 |
 | `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` | — | 可成为首个管理员的精确 OIDC subject，逗号分隔；推荐留空并先创建本地管理员 |
 | `OIDC_SESSION_MAX_AGE` | `12h` | OIDC 本地 Session 不可续期突破的绝对时限，范围 `5m`–`720h` |
-| `EHENTAI_ENABLED` | `false` | 显式启用可选的 E-Hentai / ExHentai 元数据源 |
-| `EHENTAI_SITE` | `ehentai` | 元数据搜索站点：`ehentai` 或 `exhentai` |
 | `EHENTAI_IPB_MEMBER_ID` | — | 可选账号 Cookie；ExHentai 必填，必须与 pass hash 成对配置 |
 | `EHENTAI_IPB_PASS_HASH` | — | 可选账号 Cookie；仅从环境读取，禁止提交到 Git |
 | `EHENTAI_STAR` | — | 可选 `star` Cookie |
 | `EHENTAI_IGNEOUS` | — | 可选 `igneous` Cookie |
-| `EHENTAI_PREFER_ORIGINAL_TITLE` | `false` | 优先使用 gallery 原始标题 |
-| `EHENTAI_SEARCH_EXPUNGED` | `false` | 标题搜索时包含 expunged galleries |
 | `DATABASE_URL` | `./data/nowen-reader.db` | SQLite 数据库文件路径 |
 | `COMICS_DIR` | `./comics` | 漫画主目录 |
 | `NOVELS_DIR` | `./novels` | 电子书主目录 |
@@ -98,7 +94,7 @@ environment:
 
 ## E-Hentai / ExHentai 元数据
 
-完整的公开 EH、登录 EX、Cookie 安全、字段映射、限流和故障排查说明见 [E-Hentai / ExHentai 元数据插件](./EHENTAI.md)。该来源默认关闭且不会自动选中，只提供元数据，不下载画廊内容。
+完整的 WebUI 开关、公开 EH、登录 EX、Cookie 安全、字段映射、限流和故障排查说明见 [E-Hentai / ExHentai 元数据插件](./EHENTAI.md)。该来源的开关、站点、标题偏好、expunged 搜索和语言限定均由管理员 WebUI 管理；环境变量只保存 Cookie。来源默认关闭且不会自动选中，只提供元数据，不下载画廊内容。
 
 ## 站点设置
 
@@ -117,6 +113,13 @@ environment:
   "language": "zh-CN",
   "theme": "dark",
   "registrationMode": "open",
+  "ehentai": {
+    "enabled": false,
+    "site": "ehentai",
+    "preferOriginalTitle": false,
+    "searchExpunged": false,
+    "forcedLanguage": ""
+  },
   "scannerConfig": {
     "syncCooldownSec": 30,
     "fsDebounceMs": 2000,

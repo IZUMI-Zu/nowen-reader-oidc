@@ -13,6 +13,27 @@ const (
 	maxEHentaiCookieLength = 512
 )
 
+var ehentaiLanguages = map[string]struct{}{
+	"chinese":  {},
+	"english":  {},
+	"french":   {},
+	"german":   {},
+	"japanese": {},
+	"korean":   {},
+	"spanish":  {},
+}
+
+// EHentaiSettings contains the non-sensitive EH/EX options persisted in
+// site-config.json and managed from the administrator WebUI. Login cookies are
+// deliberately excluded from this type.
+type EHentaiSettings struct {
+	Enabled             bool   `json:"enabled"`
+	Site                string `json:"site"`
+	PreferOriginalTitle bool   `json:"preferOriginalTitle"`
+	SearchExpunged      bool   `json:"searchExpunged"`
+	ForcedLanguage      string `json:"forcedLanguage,omitempty"`
+}
+
 // EHentaiConfig contains server-side configuration for the optional
 // E-Hentai/ExHentai metadata source. Account cookies are intentionally read
 // only from environment variables and must never be persisted in SiteConfig.
@@ -25,6 +46,7 @@ type EHentaiConfig struct {
 	Igneous             string
 	PreferOriginalTitle bool
 	SearchExpunged      bool
+	ForcedLanguage      string
 }
 
 // HasLogin reports whether both cookies required for an authenticated session
@@ -33,69 +55,128 @@ func (c EHentaiConfig) HasLogin() bool {
 	return c.IPBMemberID != "" && c.IPBPassHash != ""
 }
 
-// GetEHentaiConfig resolves and validates the optional EH/EX metadata source.
-// The source is opt-in. Invalid or incomplete credentials make an enabled
-// source unavailable instead of silently falling back to anonymous access.
+// ResolvedEHentaiSettings returns a validated-value-shaped copy with defaults.
+// Validation is kept separate so the settings handler can reject invalid input
+// before it reaches site-config.json.
+func (c SiteConfig) ResolvedEHentaiSettings() EHentaiSettings {
+	settings := EHentaiSettings{Site: EHentaiSitePublic}
+	if c.EHentai != nil {
+		settings = *c.EHentai
+		settings.Site = strings.ToLower(strings.TrimSpace(settings.Site))
+		settings.ForcedLanguage = strings.TrimSpace(settings.ForcedLanguage)
+		if settings.Site == "" {
+			settings.Site = EHentaiSitePublic
+		}
+	}
+	return settings
+}
+
+// ValidateEHentaiSettings validates values that can be written from WebUI.
+func ValidateEHentaiSettings(settings EHentaiSettings) (EHentaiSettings, error) {
+	settings.Site = strings.ToLower(strings.TrimSpace(settings.Site))
+	settings.ForcedLanguage = strings.ToLower(strings.TrimSpace(settings.ForcedLanguage))
+	if settings.Site == "" {
+		settings.Site = EHentaiSitePublic
+	}
+	switch settings.Site {
+	case EHentaiSitePublic, EHentaiSiteRestricted:
+	default:
+		return settings, fmt.Errorf("site must be ehentai or exhentai")
+	}
+	if settings.ForcedLanguage != "" {
+		if _, ok := ehentaiLanguages[settings.ForcedLanguage]; !ok {
+			return settings, fmt.Errorf("forcedLanguage is not supported")
+		}
+	}
+	return settings, nil
+}
+
+// GetEHentaiConfig resolves WebUI-managed options and environment-only account
+// credentials. Invalid or incomplete credentials make an enabled source
+// unavailable instead of silently falling back to anonymous access.
 func GetEHentaiConfig() (EHentaiConfig, error) {
-	enabled, err := parseOptionalBool("EHENTAI_ENABLED", false)
+	settings := GetSiteConfig().ResolvedEHentaiSettings()
+	return ResolveEHentaiConfig(settings)
+}
+
+// ResolveEHentaiConfig validates settings against credentials in the current
+// process environment. It is also used by the admin settings endpoint before
+// persisting an enabled configuration.
+func ResolveEHentaiConfig(settings EHentaiSettings) (EHentaiConfig, error) {
+	settings, err := ValidateEHentaiSettings(settings)
 	cfg := EHentaiConfig{
-		Enabled: enabled,
-		Site:    strings.ToLower(strings.TrimSpace(os.Getenv("EHENTAI_SITE"))),
+		Enabled:             settings.Enabled,
+		Site:                settings.Site,
+		PreferOriginalTitle: settings.PreferOriginalTitle,
+		SearchExpunged:      settings.SearchExpunged,
+		ForcedLanguage:      settings.ForcedLanguage,
 	}
 	if err != nil {
 		return cfg, err
 	}
-	if cfg.Site == "" {
-		cfg.Site = EHentaiSitePublic
-	}
-	if !enabled {
+	if !cfg.Enabled {
 		return cfg, nil
 	}
 
-	switch cfg.Site {
-	case EHentaiSitePublic, EHentaiSiteRestricted:
-	default:
-		return cfg, fmt.Errorf("EHENTAI_SITE must be ehentai or exhentai")
+	credentials, err := loadEHentaiCredentials()
+	if err != nil {
+		return cfg, err
 	}
-
-	cfg.IPBMemberID = strings.TrimSpace(os.Getenv("EHENTAI_IPB_MEMBER_ID"))
-	cfg.IPBPassHash = strings.TrimSpace(os.Getenv("EHENTAI_IPB_PASS_HASH"))
-	cfg.Star = strings.TrimSpace(os.Getenv("EHENTAI_STAR"))
-	cfg.Igneous = strings.TrimSpace(os.Getenv("EHENTAI_IGNEOUS"))
-
-	if (cfg.IPBMemberID == "") != (cfg.IPBPassHash == "") {
-		return cfg, fmt.Errorf("EHENTAI_IPB_MEMBER_ID and EHENTAI_IPB_PASS_HASH must be configured together")
-	}
+	cfg.IPBMemberID = credentials.IPBMemberID
+	cfg.IPBPassHash = credentials.IPBPassHash
+	cfg.Star = credentials.Star
+	cfg.Igneous = credentials.Igneous
 	if cfg.Site == EHentaiSiteRestricted && !cfg.HasLogin() {
-		return cfg, fmt.Errorf("EHENTAI_SITE=exhentai requires EHENTAI_IPB_MEMBER_ID and EHENTAI_IPB_PASS_HASH")
+		return cfg, fmt.Errorf("ExHentai requires EHENTAI_IPB_MEMBER_ID and EHENTAI_IPB_PASS_HASH")
 	}
-	if cfg.IPBMemberID != "" {
-		for _, value := range cfg.IPBMemberID {
+	return cfg, nil
+}
+
+// EHentaiCredentialsConfigured reports credential presence without returning
+// any secret. Invalid or incomplete values are reported as an error.
+func EHentaiCredentialsConfigured() (bool, error) {
+	credentials, err := loadEHentaiCredentials()
+	if err != nil {
+		return false, err
+	}
+	return credentials.IPBMemberID != "" && credentials.IPBPassHash != "", nil
+}
+
+type ehentaiCredentials struct {
+	IPBMemberID string
+	IPBPassHash string
+	Star        string
+	Igneous     string
+}
+
+func loadEHentaiCredentials() (ehentaiCredentials, error) {
+	credentials := ehentaiCredentials{
+		IPBMemberID: strings.TrimSpace(os.Getenv("EHENTAI_IPB_MEMBER_ID")),
+		IPBPassHash: strings.TrimSpace(os.Getenv("EHENTAI_IPB_PASS_HASH")),
+		Star:        strings.TrimSpace(os.Getenv("EHENTAI_STAR")),
+		Igneous:     strings.TrimSpace(os.Getenv("EHENTAI_IGNEOUS")),
+	}
+	if (credentials.IPBMemberID == "") != (credentials.IPBPassHash == "") {
+		return credentials, fmt.Errorf("EHENTAI_IPB_MEMBER_ID and EHENTAI_IPB_PASS_HASH must be configured together")
+	}
+	if credentials.IPBMemberID != "" {
+		for _, value := range credentials.IPBMemberID {
 			if !unicode.IsDigit(value) || value > unicode.MaxASCII {
-				return cfg, fmt.Errorf("EHENTAI_IPB_MEMBER_ID must contain only ASCII digits")
+				return credentials, fmt.Errorf("EHENTAI_IPB_MEMBER_ID must contain only ASCII digits")
 			}
 		}
 	}
 	for key, value := range map[string]string{
-		"EHENTAI_IPB_MEMBER_ID": cfg.IPBMemberID,
-		"EHENTAI_IPB_PASS_HASH": cfg.IPBPassHash,
-		"EHENTAI_STAR":          cfg.Star,
-		"EHENTAI_IGNEOUS":       cfg.Igneous,
+		"EHENTAI_IPB_MEMBER_ID": credentials.IPBMemberID,
+		"EHENTAI_IPB_PASS_HASH": credentials.IPBPassHash,
+		"EHENTAI_STAR":          credentials.Star,
+		"EHENTAI_IGNEOUS":       credentials.Igneous,
 	} {
 		if !validEHentaiCookieValue(value) {
-			return cfg, fmt.Errorf("%s contains invalid cookie characters or is too long", key)
+			return credentials, fmt.Errorf("%s contains invalid cookie characters or is too long", key)
 		}
 	}
-
-	cfg.PreferOriginalTitle, err = parseOptionalBool("EHENTAI_PREFER_ORIGINAL_TITLE", false)
-	if err != nil {
-		return cfg, err
-	}
-	cfg.SearchExpunged, err = parseOptionalBool("EHENTAI_SEARCH_EXPUNGED", false)
-	if err != nil {
-		return cfg, err
-	}
-	return cfg, nil
+	return credentials, nil
 }
 
 func validEHentaiCookieValue(value string) bool {

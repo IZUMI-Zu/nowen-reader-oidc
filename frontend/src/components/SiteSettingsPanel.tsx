@@ -12,6 +12,7 @@ import { FolderBrowser } from "@/components/FolderBrowser";
 import { useTranslation } from "@/lib/i18n";
 import { invalidateSiteSettings } from "@/hooks/useSiteSettings";
 import { apiPath } from "@/lib/base-path";
+import type { EHentaiSettings } from "@/hooks/useEHentaiSettings";
 
 interface SiteConfig {
   siteName: string;
@@ -112,6 +113,8 @@ export function SiteSettingsPanel() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [ehentaiSettings, setEHentaiSettings] = useState<EHentaiSettings | null>(null);
 
   // 高亮锚点（用于从 Navbar 灰显入口跳转过来时闪烁提示）
   const scraperRef = useRef<HTMLDivElement>(null);
@@ -167,9 +170,10 @@ export function SiteSettingsPanel() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(apiPath("/api/site-settings"), {
-        credentials: "include",
-      });
+      const [res, ehentaiRes] = await Promise.all([
+        fetch(apiPath("/api/site-settings"), { credentials: "include" }),
+        fetch(apiPath("/api/metadata/ehentai/settings"), { credentials: "include" }),
+      ]);
       const contentType = res.headers.get("content-type") || "";
       if (!res.ok) {
         const body = await res.text();
@@ -185,12 +189,18 @@ export function SiteSettingsPanel() {
         throw new Error(`站点设置接口返回了 HTML 而不是 JSON，通常是反代 / 认证跳转：${preview}`);
       }
       const data = await res.json();
+      if (!ehentaiRes.ok || !(ehentaiRes.headers.get("content-type") || "").includes("json")) {
+        const body = await ehentaiRes.text();
+        throw new Error(`EH/EX 设置加载失败 (${ehentaiRes.status}): ${body.slice(0, 240)}`);
+      }
+      const ehentaiData = await ehentaiRes.json();
       setConfig({
         extraComicsDirs: [],
         extraNovelsDirs: [],
         ebookTypeAutoDetect: "comics",
         ...data,
       });
+      setEHentaiSettings(ehentaiData);
     } catch (err) {
       console.error("[SiteSettingsPanel] load failed:", err);
       setError(err instanceof Error ? err.message : "加载站点设置失败");
@@ -217,20 +227,44 @@ export function SiteSettingsPanel() {
   };
 
   const handleSave = async () => {
-    if (!config) return;
+    if (!config || !ehentaiSettings) return;
     setSaving(true);
     setSaved(false);
+    setSaveError(null);
     try {
+      const ehentaiRes = await fetch(apiPath("/api/metadata/ehentai/settings"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          enabled: ehentaiSettings.enabled,
+          site: ehentaiSettings.site,
+          preferOriginalTitle: ehentaiSettings.preferOriginalTitle,
+          searchExpunged: ehentaiSettings.searchExpunged,
+          forcedLanguage: ehentaiSettings.forcedLanguage,
+        }),
+      });
+      const ehentaiData = await ehentaiRes.json().catch(() => ({}));
+      if (!ehentaiRes.ok) {
+        throw new Error(ehentaiData.error || `EH/EX settings save failed: ${ehentaiRes.status}`);
+      }
+      setEHentaiSettings(ehentaiData);
+
       const res = await fetch(apiPath("/api/site-settings"), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify(config),
       });
-      if (res.ok) {
-        setSaved(true);
-        invalidateSiteSettings();
-        setTimeout(() => setSaved(false), 2000);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Site settings save failed: ${res.status}`);
       }
+      setSaved(true);
+      invalidateSiteSettings();
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "设置保存失败");
     } finally {
       setSaving(false);
     }
@@ -240,6 +274,13 @@ export function SiteSettingsPanel() {
     if (!config) return;
     setConfig({ ...config, [key]: value });
     setSaved(false);
+  };
+
+  const updateEHentai = <K extends keyof EHentaiSettings>(key: K, value: EHentaiSettings[K]) => {
+    if (!ehentaiSettings) return;
+    setEHentaiSettings({ ...ehentaiSettings, [key]: value });
+    setSaved(false);
+    setSaveError(null);
   };
 
   // Icon upload states
@@ -1177,6 +1218,105 @@ export function SiteSettingsPanel() {
         </div>
       </div>
 
+      {/* E-Hentai / ExHentai source settings */}
+      {ehentaiSettings && (
+        <div className="space-y-4 rounded-xl bg-background p-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+                <Database className="h-3.5 w-3.5 text-red-400" />
+                {siteT?.ehentaiTitle || "E-Hentai / ExHentai"}
+              </div>
+              <p className="mt-1 text-[11px] text-muted">
+                {siteT?.ehentaiDesc || "Adult metadata source. It is never selected by default."}
+              </p>
+            </div>
+            <button
+              type="button"
+              aria-pressed={ehentaiSettings.enabled}
+              onClick={() => updateEHentai("enabled", !ehentaiSettings.enabled)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ${
+                ehentaiSettings.enabled ? "bg-red-500" : "bg-border"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${
+                  ehentaiSettings.enabled ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1.5 text-[11px] text-muted">
+              <span>{siteT?.ehentaiSite || "Search site"}</span>
+              <select
+                value={ehentaiSettings.site}
+                onChange={(event) => updateEHentai("site", event.target.value as "ehentai" | "exhentai")}
+                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground outline-none focus:border-accent/50"
+              >
+                <option value="ehentai">E-Hentai</option>
+                <option value="exhentai">ExHentai</option>
+              </select>
+            </label>
+            <label className="space-y-1.5 text-[11px] text-muted">
+              <span>{siteT?.ehentaiLanguage || "Forced search language"}</span>
+              <select
+                value={ehentaiSettings.forcedLanguage}
+                onChange={(event) => updateEHentai("forcedLanguage", event.target.value)}
+                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground outline-none focus:border-accent/50"
+              >
+                <option value="">{siteT?.ehentaiLanguageAny || "No restriction"}</option>
+                <option value="english">English</option>
+                <option value="chinese">Chinese</option>
+                <option value="japanese">Japanese</option>
+                <option value="korean">Korean</option>
+                <option value="spanish">Spanish</option>
+                <option value="french">French</option>
+                <option value="german">German</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="flex items-center justify-between gap-4 text-xs text-foreground">
+            <span>{siteT?.ehentaiPreferOriginal || "Prefer the original title"}</span>
+            <input
+              type="checkbox"
+              checked={ehentaiSettings.preferOriginalTitle}
+              onChange={(event) => updateEHentai("preferOriginalTitle", event.target.checked)}
+              className="h-4 w-4 accent-red-500"
+            />
+          </label>
+          <label className="flex items-center justify-between gap-4 text-xs text-foreground">
+            <span>{siteT?.ehentaiSearchExpunged || "Search expunged galleries"}</span>
+            <input
+              type="checkbox"
+              checked={ehentaiSettings.searchExpunged}
+              onChange={(event) => updateEHentai("searchExpunged", event.target.checked)}
+              className="h-4 w-4 accent-red-500"
+            />
+          </label>
+
+          <div
+            className={`rounded-lg border px-3 py-2 text-[11px] ${
+              ehentaiSettings.credentialsConfigured
+                ? "border-green-500/30 bg-green-500/5 text-green-400"
+                : "border-border bg-card text-muted"
+            }`}
+          >
+            {siteT?.ehentaiCookie || "Account cookies"}: {ehentaiSettings.credentialsConfigured
+              ? (siteT?.ehentaiCookieConfigured || "Configured through environment variables")
+              : (siteT?.ehentaiCookieMissing || "Not configured (public E-Hentai supports anonymous access)")}
+            {ehentaiSettings.site === "exhentai" && !ehentaiSettings.credentialsConfigured && (
+              <p className="mt-1 text-red-400">{siteT?.ehentaiExRequiresCookies || "ExHentai requires the member ID and pass hash."}</p>
+            )}
+            {ehentaiSettings.configurationError && (
+              <p className="mt-1 text-red-400">{ehentaiSettings.configurationError}</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Default Reading Mode */}
       <DefaultReadingModeSelect siteT={siteT} />
 
@@ -1202,9 +1342,14 @@ export function SiteSettingsPanel() {
 
 
       {/* Save Button */}
+      {saveError && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-400">
+          {saveError}
+        </div>
+      )}
       <button
         onClick={handleSave}
-        disabled={saving}
+        disabled={saving || !ehentaiSettings}
         className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-xs font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
       >
         {saved ? (

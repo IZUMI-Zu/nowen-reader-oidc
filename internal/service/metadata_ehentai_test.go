@@ -77,7 +77,7 @@ func TestEHentaiBuildSearchURL(t *testing.T) {
 	base, _ := url.Parse("http://127.0.0.1:12345/")
 	apiURL, _ := url.Parse("http://127.0.0.1:12345/api.php")
 	provider, err := newEHentaiProviderWithEndpoints(
-		config.EHentaiConfig{Enabled: true, Site: config.EHentaiSitePublic, SearchExpunged: true},
+		config.EHentaiConfig{Enabled: true, Site: config.EHentaiSitePublic, SearchExpunged: true, ForcedLanguage: "english"},
 		&http.Client{},
 		ehEndpoints{searchBase: base, apiURL: apiURL},
 		newEHIntervalLimiter(0),
@@ -92,11 +92,24 @@ func TestEHentaiBuildSearchURL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := u.Query().Get("f_search"), `"A quoted title"`; got != want {
+		if got, want := u.Query().Get("f_search"), `"A quoted title" language:english`; got != want {
 			t.Fatalf("f_search = %q, want %q", got, want)
 		}
 		if u.Query().Get("f_sh") != "on" {
 			t.Fatal("expunged search flag missing")
+		}
+		if !strings.Contains(u.Query().Get("f_search"), "language:english") {
+			t.Fatalf("forced language missing from %q", u.Query().Get("f_search"))
+		}
+	})
+
+	t.Run("existing artist tag", func(t *testing.T) {
+		u, err := provider.buildSearchURLWithArtist("Archive title", "fixture artist")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := u.Query().Get("f_search"), `"Archive title" artist:fixture artist language:english`; got != want {
+			t.Fatalf("f_search = %q, want %q", got, want)
 		}
 	})
 
@@ -229,6 +242,35 @@ func TestEHentaiProviderExactURLSkipsSearchAndPrefersOriginalTitle(t *testing.T)
 	}
 }
 
+func TestEHentaiProviderSourceTagSkipsSearch(t *testing.T) {
+	apiFixture, err := os.ReadFile("testdata/ehentai_gdata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var searchCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/api.php" {
+			_, _ = w.Write(apiFixture)
+			return
+		}
+		searchCalls.Add(1)
+		http.Error(w, "unexpected search", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	provider := newLocalEHProvider(t, server, config.EHentaiConfig{Enabled: true, Site: config.EHentaiSitePublic})
+	results, err := provider.searchWithTags(context.Background(), "unrelated archive title", "en", []string{
+		"artist:fixture artist",
+		"source:http://e-hentai.org/g/1866546/2e521d4407/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searchCalls.Load() != 0 || len(results) != 1 {
+		t.Fatalf("unexpected source-tag result: calls=%d results=%+v", searchCalls.Load(), results)
+	}
+}
+
 func TestEHentaiProviderRejectsUnsafeRedirect(t *testing.T) {
 	var targetCalls atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -284,6 +326,10 @@ func TestEHentaiProviderClassifiesFailuresWithoutResponseContent(t *testing.T) {
 }
 
 func TestSearchEHentaiDisabledDoesNotUseNetwork(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	if err := config.SaveSiteConfig(&config.SiteConfig{}); err != nil {
+		t.Fatal(err)
+	}
 	for _, key := range []string{
 		"EHENTAI_ENABLED", "EHENTAI_SITE", "EHENTAI_IPB_MEMBER_ID", "EHENTAI_IPB_PASS_HASH",
 		"EHENTAI_STAR", "EHENTAI_IGNEOUS", "EHENTAI_PREFER_ORIGINAL_TITLE", "EHENTAI_SEARCH_EXPUNGED",

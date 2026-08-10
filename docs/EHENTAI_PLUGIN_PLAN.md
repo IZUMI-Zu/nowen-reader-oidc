@@ -31,6 +31,8 @@ packages.
      `exhentai.org/g/{gid}/{token}` gallery URL;
    - a title containing `[gid]`, resolved through a `gid:` search;
    - a normal title search.
+   Existing `source:` tags bypass title search and existing ASCII `artist:`
+   tags narrow normal searches.
 3. Search either E-Hentai or ExHentai according to server configuration.
 4. Map gallery metadata to Nowen Reader fields:
    - English/romanized or original title;
@@ -68,22 +70,29 @@ and a no-wait limiter. That seam is not exposed to handlers or other packages.
 
 ## Configuration
 
-The plugin is disabled by default. Configuration is read from environment
-variables so account cookies are never written to `site-config.json`, returned
-by the site-settings endpoint, or stored in the database.
+The plugin is disabled by default. Administrators manage non-sensitive options
+through a dedicated WebUI and admin-only endpoint. Account cookies remain
+environment-only and are never written to `site-config.json`, returned by an
+API, or stored in the database.
 
-Planned variables:
+WebUI-managed settings:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| Enabled | `false` | Makes the source available for explicit selection. |
+| Site | `ehentai` | `ehentai` or `exhentai`. |
+| Prefer original title | `false` | Prefer `title_jpn` when present. |
+| Search expunged | `false` | Include expunged galleries in search. |
+| Forced language | empty | Add an EH `language:` search restriction. |
+
+Environment-only secrets:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `EHENTAI_ENABLED` | `false` | Enables the metadata source. |
-| `EHENTAI_SITE` | `ehentai` | `ehentai` or `exhentai`. |
 | `EHENTAI_IPB_MEMBER_ID` | empty | Account member cookie. |
 | `EHENTAI_IPB_PASS_HASH` | empty | Account pass-hash cookie. |
 | `EHENTAI_STAR` | empty | Optional account star cookie. |
 | `EHENTAI_IGNEOUS` | empty | Optional ExHentai access cookie. |
-| `EHENTAI_PREFER_ORIGINAL_TITLE` | `false` | Prefer `title_jpn` when present. |
-| `EHENTAI_SEARCH_EXPUNGED` | `false` | Include expunged galleries in search. |
 
 For ExHentai, member ID and pass hash are mandatory. Incomplete or malformed
 credentials make the source unavailable instead of falling back silently.

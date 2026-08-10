@@ -18,7 +18,7 @@ func NewMetadataHandler() *MetadataHandler { return &MetadataHandler{} }
 // POST /api/metadata/search
 // Also handles GET /api/metadata/search?q=...&sources=...&lang=...
 func (h *MetadataHandler) Search(c *gin.Context) {
-	var query, lang string
+	var query, lang, comicID string
 	var sources []string
 
 	var contentType string
@@ -27,6 +27,7 @@ func (h *MetadataHandler) Search(c *gin.Context) {
 		query = c.Query("q")
 		lang = c.DefaultQuery("lang", "en")
 		contentType = c.Query("contentType")
+		comicID = c.Query("comicId")
 		if s := c.Query("sources"); s != "" {
 			sources = strings.Split(s, ",")
 		}
@@ -36,6 +37,7 @@ func (h *MetadataHandler) Search(c *gin.Context) {
 			Sources     []string `json:"sources"`
 			Lang        string   `json:"lang"`
 			ContentType string   `json:"contentType"`
+			ComicID     string   `json:"comicId"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(400, gin.H{"error": "invalid request body"})
@@ -45,6 +47,7 @@ func (h *MetadataHandler) Search(c *gin.Context) {
 		sources = body.Sources
 		lang = body.Lang
 		contentType = body.ContentType
+		comicID = body.ComicID
 		if lang == "" {
 			lang = "en"
 		}
@@ -55,11 +58,35 @@ func (h *MetadataHandler) Search(c *gin.Context) {
 		return
 	}
 
-	results := service.SearchMetadata(query, sources, lang, contentType)
+	options := service.MetadataSearchOptions{}
+	if comicID != "" && includesMetadataSource(sources, "ehentai") {
+		comic, err := store.GetComicByID(comicID)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "failed to load comic search context"})
+			return
+		}
+		if comic != nil {
+			options.EHentaiExistingTags = make([]string, 0, len(comic.Tags))
+			for _, tag := range comic.Tags {
+				options.EHentaiExistingTags = append(options.EHentaiExistingTags, tag.Name)
+			}
+		}
+	}
+
+	results := service.SearchMetadataWithOptions(query, sources, lang, options, contentType)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}
 	c.JSON(200, gin.H{"results": results})
+}
+
+func includesMetadataSource(sources []string, target string) bool {
+	for _, source := range sources {
+		if source == target {
+			return true
+		}
+	}
+	return false
 }
 
 // POST /api/metadata/apply

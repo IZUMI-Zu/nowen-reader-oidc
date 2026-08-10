@@ -1,10 +1,11 @@
 "use client";
 
 import { apiPath } from "@/lib/base-path";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useTranslation, useLocale } from "@/lib/i18n";
 import { Search, Download, Check, Loader2, BookOpen, FileSearch, Filter } from "lucide-react";
 import { emitScrapeApplied } from "@/lib/sync-event";
+import { useEHentaiSettings } from "@/hooks/useEHentaiSettings";
 
 interface MetadataResult {
   title?: string;
@@ -32,7 +33,7 @@ const COMIC_SOURCES = [
   { id: "mangadex", name: "MangaDex", icon: "📖" },
   { id: "mangaupdates", name: "MangaUpdates", icon: "📋" },
   { id: "kitsu", name: "Kitsu", icon: "🦊" },
-	{ id: "ehentai", name: "E-Hentai / ExHentai", icon: "🔞" },
+  { id: "ehentai", name: "E-Hentai / ExHentai", icon: "🔞" },
 ] as const;
 
 // 小说数据源
@@ -54,8 +55,8 @@ const SOURCE_COLORS: Record<string, string> = {
   mangadex: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
   mangaupdates: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
   kitsu: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-	ehentai: "bg-red-500/15 text-red-600 dark:text-red-400",
-	exhentai: "bg-red-700/15 text-red-700 dark:text-red-300",
+  ehentai: "bg-red-500/15 text-red-600 dark:text-red-400",
+  exhentai: "bg-red-700/15 text-red-700 dark:text-red-300",
   googlebooks: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
   comicinfo: "bg-gray-500/15 text-gray-600 dark:text-gray-400",
 };
@@ -71,10 +72,13 @@ interface Props {
 export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApplied }: Props) {
   const t = useTranslation();
   const { locale } = useLocale();
+  const { settings: ehentaiSettings } = useEHentaiSettings();
 
   // 优先使用数据库 type 字段判断，fallback 到文件后缀
   const isNovel = comicType ? comicType === "novel" : isNovelFile(filename);
-  const availableSources = isNovel ? NOVEL_SOURCES : COMIC_SOURCES;
+  const availableSources = isNovel
+    ? NOVEL_SOURCES
+    : COMIC_SOURCES.filter((source) => source.id !== "ehentai" || (ehentaiSettings?.enabled && ehentaiSettings.configurationValid));
   const defaultSources = isNovel ? DEFAULT_NOVEL_SOURCES : DEFAULT_COMIC_SOURCES;
 
   const getSourceName = (id: string) => {
@@ -90,6 +94,12 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
   const [enabledSources, setEnabledSources] = useState<string[]>(defaultSources as unknown as string[]);
   const [showSourceFilter, setShowSourceFilter] = useState(false);
   const [skipCover, setSkipCover] = useState(false); // P2-A: 不替换封面
+
+  useEffect(() => {
+    if (!ehentaiSettings?.enabled || !ehentaiSettings.configurationValid) {
+      setEnabledSources((previous) => previous.filter((source) => source !== "ehentai"));
+    }
+  }, [ehentaiSettings?.enabled, ehentaiSettings?.configurationValid]);
 
   const toggleSource = (id: string) => {
     setEnabledSources((prev) =>
@@ -111,6 +121,7 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
         sources: enabledSources.join(","),
         lang: locale,
         contentType: isNovel ? "novel" : "comic",
+        comicId,
       });
       const res = await fetch(apiPath(`/api/metadata/search?${params}`));
       const data = await res.json();

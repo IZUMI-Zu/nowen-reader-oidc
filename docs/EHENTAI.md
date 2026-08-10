@@ -20,6 +20,8 @@ Nowen Reader 可以把 E-Hentai 或 ExHentai 作为一个**显式选择的漫画
 | 普通标题 | 在配置的 EH 或 EX 站点进行标题搜索，再批量读取前 10 个结果的元数据 |
 | 包含 `[gid]` 的标题 | 使用 `gid:{id}` 搜索找到 gallery token，再读取元数据 |
 | 完整 gallery URL | 直接读取该 `gid/token`，跳过搜索页面 |
+| 漫画已有 `source:` gallery 标签 | 自动使用标签中的 `gid/token`，跳过标题搜索 |
+| 漫画已有 ASCII `artist:` 标签 | 把作者限定条件加入普通标题搜索 |
 
 完整 URL 只接受以下 HTTPS 形式：
 
@@ -29,24 +31,26 @@ https://exhentai.org/g/{gid}/{token}/
 ```
 
 相似域名、HTTP URL、带 userinfo、query 或 fragment 的 URL 会被拒绝。
+已有 `source:` 标签中的历史 HTTP 地址会先升级为 HTTPS，再按同样的固定域名规则验证。
 
-## 快速配置
+## WebUI 配置
+
+使用管理员账号打开 **设置 → 站点设置 → E-Hentai / ExHentai**：
+
+1. 选择 E-Hentai 或 ExHentai；
+2. 按需设置原始标题、expunged gallery 和强制搜索语言；
+3. 开启 EH/EX 来源并保存；
+4. 在漫画或系列元数据搜索中手动勾选 **E-Hentai / ExHentai**。
+
+EH/EX 总开关和非敏感选项写入 `{DATA_DIR}/site-config.json`。管理员专用接口只返回 Cookie 的“已配置/未配置”状态，Cookie 内容不会进入 WebUI、站点配置或 API 响应。
+
+全局 **启用内容刮削** 仍是上层总开关；关闭后所有元数据来源（包括 EH/EX）都会被后端拒绝。
+
+## Cookie 配置
 
 ### 公开 E-Hentai
 
-公开搜索不强制要求账号 Cookie：
-
-```yaml
-services:
-  nowen-reader:
-    environment:
-      EHENTAI_ENABLED: "true"
-      EHENTAI_SITE: ehentai
-      EHENTAI_PREFER_ORIGINAL_TITLE: "false"
-      EHENTAI_SEARCH_EXPUNGED: "false"
-```
-
-重启 Nowen Reader 后，打开漫画详情或系列元数据搜索，展开数据源筛选并手动勾选 **E-Hentai / ExHentai**。
+公开搜索不强制要求账号 Cookie，不需要为 EH 设置任何环境变量。直接在 WebUI 选择 E-Hentai 并启用即可。
 
 ### ExHentai
 
@@ -56,30 +60,28 @@ ExHentai 必须提供成对的 `ipb_member_id` 与 `ipb_pass_hash`：
 services:
   nowen-reader:
     environment:
-      EHENTAI_ENABLED: "true"
-      EHENTAI_SITE: exhentai
       EHENTAI_IPB_MEMBER_ID: ${EHENTAI_IPB_MEMBER_ID:?set in a protected .env file}
       EHENTAI_IPB_PASS_HASH: ${EHENTAI_IPB_PASS_HASH:?set in a protected .env file}
       EHENTAI_STAR: ${EHENTAI_STAR:-}
       EHENTAI_IGNEOUS: ${EHENTAI_IGNEOUS:-}
-      EHENTAI_PREFER_ORIGINAL_TITLE: "false"
-      EHENTAI_SEARCH_EXPUNGED: "false"
 ```
+
+配置环境变量并重启后，在 WebUI 选择 ExHentai 并启用。没有有效的 member ID/pass hash 时，后端会拒绝保存“已启用的 ExHentai”配置。
 
 > [!CAUTION]
 > Cookie 等同于账号会话凭据。不要提交到 Git、粘贴到 issue、截图或日志，也不要与不受信任的人共享。建议使用专用低权限账号并定期轮换 Cookie。Nowen Reader 不需要也不会接收 EH/EX 的用户名和密码。
 
-## 配置参考
+## WebUI 选项参考
 
-### `EHENTAI_ENABLED`
+### 启用 EH/EX
 
 类型：boolean
 
 默认值：`false`
 
-显式启用插件。无效布尔值会导致插件配置不可用，不会被当成 `true`。
+控制来源是否显示在元数据来源选择器中。默认关闭；即使开启也不会自动加入普通或批量刮削的默认来源。
 
-### `EHENTAI_SITE`
+### 检索站点
 
 类型：string
 
@@ -87,7 +89,27 @@ services:
 
 允许值：`ehentai`、`exhentai`
 
-选择标题搜索使用的站点。`exhentai` 模式要求完整登录 Cookie，缺失时 fail closed，不会自动回退到公开 E-Hentai。
+选择标题搜索使用的站点。ExHentai 要求完整登录 Cookie，缺失时 fail closed，不会自动回退到公开 E-Hentai。
+
+### 优先使用原始标题
+
+默认值：关闭
+
+开启时优先使用 API 的 `title_jpn`；原始标题为空时回退到英文/罗马字标题。
+
+### 搜索已删除的画廊
+
+默认值：关闭
+
+开启时在标题搜索中加入 expunged gallery 搜索选项。精确 gallery URL 和 `source:` 标签直达不受此选项影响。
+
+### 强制搜索语言
+
+默认值：不限制
+
+为普通标题搜索追加 `language:{name}` 限定。该值由 WebUI 的固定选项生成；含控制字符、非 ASCII 内容或搜索表达式的值会被后端拒绝。E-Hentai 本身对部分语言限定（尤其日语）的支持有限。
+
+## 环境变量参考
 
 ### `EHENTAI_IPB_MEMBER_ID`
 
@@ -120,22 +142,6 @@ EH 账号的 `ipb_pass_hash` Cookie。换行、分号、逗号、引号、反斜
 默认值：空
 
 可选 `igneous` Cookie，用于需要它的 ExHentai 会话。
-
-### `EHENTAI_PREFER_ORIGINAL_TITLE`
-
-类型：boolean
-
-默认值：`false`
-
-为 `true` 时优先使用 API 的 `title_jpn`；原始标题为空时回退到英文/罗马字标题。
-
-### `EHENTAI_SEARCH_EXPUNGED`
-
-类型：boolean
-
-默认值：`false`
-
-为 `true` 时在标题搜索中加入 expunged gallery 搜索选项。直接使用完整 gallery URL 不受此选项影响。
 
 ## Cookie 获取与存储
 
@@ -188,15 +194,14 @@ chmod 600 .env
 
 确认：
 
-1. `EHENTAI_ENABLED=true`；
-2. 已重启服务；
-3. 在数据源筛选中手动勾选了 EH/EX；
-4. 标题没有超过 200 个搜索字符；
-5. 服务日志中没有显示配置无效、限流或认证被拒绝。
+1. 全局“启用内容刮削”和 EH/EX 来源开关均已开启；
+2. 在数据源筛选中手动勾选了 EH/EX；
+3. 标题没有超过 200 个搜索字符；
+4. 服务日志中没有显示配置无效、限流或认证被拒绝。
 
 ### ExHentai 一直认证失败
 
-- 确认 `EHENTAI_SITE=exhentai`；
+- 确认 WebUI 中选择的是 ExHentai；
 - `ipb_member_id` 与 `ipb_pass_hash` 必须来自同一个仍有效的会话；
 - 必要时同时更新 `igneous`；
 - 不要在变量值两侧加入引号内容、换行或 Cookie 名；只填写值；

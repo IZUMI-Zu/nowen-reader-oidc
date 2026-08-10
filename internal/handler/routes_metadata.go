@@ -8,6 +8,15 @@ import (
 func registerMetadataRoutes(api *gin.RouterGroup) {
 	// Phase 4: Metadata, AI, OPDS, Recommendations, etc.
 	// ============================================================
+	// EH/EX source configuration remains available while the global scraper is
+	// disabled, but is always restricted to administrators.
+	ehentaiSettings := NewEHentaiSettingsHandler()
+	ehentaiSettingsGroup := api.Group("/metadata/ehentai")
+	ehentaiSettingsGroup.Use(middleware.AdminRequired())
+	{
+		ehentaiSettingsGroup.GET("/settings", ehentaiSettings.Get)
+		ehentaiSettingsGroup.PUT("/settings", ehentaiSettings.Update)
+	}
 
 	// Metadata scraping — requires admin + scraper enabled
 	meta := NewMetadataHandler()

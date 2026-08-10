@@ -120,6 +120,13 @@ func (l *ehIntervalLimiter) Wait(ctx context.Context) error {
 // to a sanitized log entry, matching the behavior of the other metadata
 // sources without exposing account cookies, response bodies, or search terms.
 func SearchEHentai(query, lang string) []ComicMetadata {
+	return SearchEHentaiWithTags(query, lang, nil)
+}
+
+// SearchEHentaiWithTags uses trusted, already-stored archive tags as optional
+// hints. A valid source tag bypasses title search; an ASCII artist tag narrows
+// the EH query without changing what is sent to other metadata providers.
+func SearchEHentaiWithTags(query, lang string, existingTags []string) []ComicMetadata {
 	cfg, err := config.GetEHentaiConfig()
 	if err != nil {
 		log.Printf("[metadata] E-Hentai source unavailable: %s", safeEHError(err))
@@ -133,7 +140,7 @@ func SearchEHentai(query, lang string) []ComicMetadata {
 		log.Printf("[metadata] E-Hentai source unavailable: %s", safeEHError(err))
 		return nil
 	}
-	results, err := provider.search(context.Background(), query, lang)
+	results, err := provider.searchWithTags(context.Background(), query, lang, existingTags)
 	if err != nil {
 		log.Printf("[metadata] E-Hentai search failed: %s", safeEHError(err))
 		return nil
@@ -209,6 +216,10 @@ func newEHentaiProviderWithEndpoints(cfg config.EHentaiConfig, baseClient *http.
 }
 
 func (p *ehentaiProvider) search(ctx context.Context, query, _ string) ([]ComicMetadata, error) {
+	return p.searchWithTags(ctx, query, "", nil)
+}
+
+func (p *ehentaiProvider) searchWithTags(ctx context.Context, query, _ string, existingTags []string) ([]ComicMetadata, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, errEHInvalidQuery
@@ -216,8 +227,11 @@ func (p *ehentaiProvider) search(ctx context.Context, query, _ string) ([]ComicM
 	if ref, ok := parseEHGalleryURL(query); ok {
 		return p.fetchGalleryMetadata(ctx, []ehGalleryRef{ref})
 	}
+	if ref, ok := galleryRefFromEHTags(existingTags); ok {
+		return p.fetchGalleryMetadata(ctx, []ehGalleryRef{ref})
+	}
 
-	refs, err := p.searchGalleryRefs(ctx, query)
+	refs, err := p.searchGalleryRefsWithArtist(ctx, query, artistFromEHTags(existingTags))
 	if err != nil || len(refs) == 0 {
 		return nil, err
 	}
@@ -228,7 +242,11 @@ func (p *ehentaiProvider) search(ctx context.Context, query, _ string) ([]ComicM
 }
 
 func (p *ehentaiProvider) searchGalleryRefs(ctx context.Context, query string) ([]ehGalleryRef, error) {
-	searchURL, err := p.buildSearchURL(query)
+	return p.searchGalleryRefsWithArtist(ctx, query, "")
+}
+
+func (p *ehentaiProvider) searchGalleryRefsWithArtist(ctx context.Context, query, artist string) ([]ehGalleryRef, error) {
+	searchURL, err := p.buildSearchURLWithArtist(query, artist)
 	if err != nil {
 		return nil, err
 	}
@@ -262,6 +280,10 @@ func (p *ehentaiProvider) searchGalleryRefs(ctx context.Context, query string) (
 }
 
 func (p *ehentaiProvider) buildSearchURL(query string) (*url.URL, error) {
+	return p.buildSearchURLWithArtist(query, "")
+}
+
+func (p *ehentaiProvider) buildSearchURLWithArtist(query, artist string) (*url.URL, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, errEHInvalidQuery
@@ -281,8 +303,14 @@ func (p *ehentaiProvider) buildSearchURL(query string) (*url.URL, error) {
 			return nil, errEHInvalidQuery
 		}
 		searchTerm = `"` + query + `"`
+		if artist = normalizeEHSearchTagValue(artist, 100); artist != "" {
+			searchTerm += " artist:" + artist
+		}
+		if language := normalizeEHSearchTagValue(p.cfg.ForcedLanguage, 32); language != "" {
+			searchTerm += " language:" + language
+		}
 	}
-	if len(searchTerm) > 200 {
+	if len(query) > 200 || len(searchTerm) > 384 {
 		return nil, errEHInvalidQuery
 	}
 
@@ -301,6 +329,52 @@ func (p *ehentaiProvider) buildSearchURL(query string) (*url.URL, error) {
 	}
 	u.RawQuery = values.Encode()
 	return &u, nil
+}
+
+func galleryRefFromEHTags(tags []string) (ehGalleryRef, bool) {
+	for _, tag := range tags {
+		name, value, ok := strings.Cut(strings.TrimSpace(tag), ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "source") {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if strings.HasPrefix(strings.ToLower(value), "http://") {
+			value = "https://" + value[len("http://"):]
+		}
+		if !strings.Contains(value, "://") {
+			value = "https://" + value
+		}
+		if ref, ok := parseEHGalleryURL(value); ok {
+			return ref, true
+		}
+	}
+	return ehGalleryRef{}, false
+}
+
+func artistFromEHTags(tags []string) string {
+	for _, tag := range tags {
+		name, value, ok := strings.Cut(strings.TrimSpace(tag), ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "artist") {
+			continue
+		}
+		if value = normalizeEHSearchTagValue(value, 100); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeEHSearchTagValue(value string, maxBytes int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxBytes {
+		return ""
+	}
+	for _, char := range value {
+		if char < 0x20 || char > 0x7e || char == '"' || char == '\\' {
+			return ""
+		}
+	}
+	return value
 }
 
 func (p *ehentaiProvider) fetchGalleryMetadata(ctx context.Context, refs []ehGalleryRef) ([]ComicMetadata, error) {

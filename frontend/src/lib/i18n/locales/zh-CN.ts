@@ -458,10 +458,10 @@ const zhCN = {
     password: "密码",
     nickname: "昵称 (可选)",
     login: "登录",
-	loginWith: "使用 {provider} 登录",
-	or: "或者",
-	oidcError: "单点登录未完成，请重试。",
-	noLoginMethods: "当前没有可用的登录方式，请联系管理员。",
+  loginWith: "使用 {provider} 登录",
+  or: "或者",
+  oidcError: "单点登录未完成，请重试。",
+  noLoginMethods: "当前没有可用的登录方式，请联系管理员。",
     register: "注册",
     logout: "退出登录",
     settings: "设置",
@@ -500,8 +500,8 @@ const zhCN = {
       mangadex: "MangaDex (漫画索引)",
       mangaupdates: "MangaUpdates (漫画更新)",
       kitsu: "Kitsu (狐狸)",
-		ehentai: "E-Hentai / ExHentai",
-		exhentai: "ExHentai",
+    ehentai: "E-Hentai / ExHentai",
+    exhentai: "ExHentai",
       googlebooks: "Google Books (谷歌图书)",
       comicinfo: "ComicInfo (本地)",
       epub_opf: "EPUB OPF (本地)",
@@ -652,6 +652,17 @@ const zhCN = {
     restartHint: "部分设置需要重启后生效",
     scraperEnabled: "启用内容刮削",
     scraperEnabledDesc: "开启后允许系统从在线数据源（AniList、Bangumi 等）自动获取封面、简介、标签等元数据。关闭时所有自动内容获取和更新操作将被禁止。",
+    ehentaiTitle: "E-Hentai / ExHentai",
+    ehentaiDesc: "成人元数据源，仅在启用后显示于搜索来源中；自动刮削不会默认选择它。",
+    ehentaiSite: "检索站点",
+    ehentaiLanguage: "强制搜索语言",
+    ehentaiLanguageAny: "不限制",
+    ehentaiPreferOriginal: "优先使用原始标题",
+    ehentaiSearchExpunged: "搜索已删除的画廊",
+    ehentaiCookie: "账号 Cookie",
+    ehentaiCookieConfigured: "已通过环境变量配置",
+    ehentaiCookieMissing: "未配置（公开 E-Hentai 可匿名使用）",
+    ehentaiExRequiresCookies: "启用 ExHentai 前必须配置 member ID 与 pass hash。",
     ebookTypeAutoDetect: "电子书类型识别策略",
     ebookTypeAutoDetectDesc: "EPUB/MOBI/AZW3 文件可能既是图文教材也可能是漫画。该选项决定系统如何判断它们是漫画还是小说。",
     ebookDetectComicsOnly: "仅漫画目录里的电子书做内容识别（推荐）",
@@ -1772,10 +1783,10 @@ export interface Translations {
     password: string;
     nickname: string;
     login: string;
-	loginWith: string;
-	or: string;
-	oidcError: string;
-	noLoginMethods: string;
+  loginWith: string;
+  or: string;
+  oidcError: string;
+  noLoginMethods: string;
     register: string;
     logout: string;
     settings: string;
@@ -1812,8 +1823,8 @@ export interface Translations {
       mangadex: string;
       mangaupdates: string;
       kitsu: string;
-		ehentai: string;
-		exhentai: string;
+    ehentai: string;
+    exhentai: string;
       googlebooks: string;
       comicinfo: string;
       epub_opf: string;
@@ -1956,6 +1967,17 @@ export interface Translations {
     restartHint: string;
     scraperEnabled: string;
     scraperEnabledDesc: string;
+    ehentaiTitle: string;
+    ehentaiDesc: string;
+    ehentaiSite: string;
+    ehentaiLanguage: string;
+    ehentaiLanguageAny: string;
+    ehentaiPreferOriginal: string;
+    ehentaiSearchExpunged: string;
+    ehentaiCookie: string;
+    ehentaiCookieConfigured: string;
+    ehentaiCookieMissing: string;
+    ehentaiExRequiresCookies: string;
     ebookTypeAutoDetect: string;
     ebookTypeAutoDetectDesc: string;
     ebookDetectComicsOnly: string;

@@ -20,6 +20,8 @@ The implementation references LANraragi's official [`Metadata/EHentai.pm`](https
 | Normal title | Search the configured EH or EX site, then fetch metadata for the first 10 results in one batch |
 | Title containing `[gid]` | Search with `gid:{id}` to resolve the gallery token |
 | Full gallery URL | Fetch that `gid/token` directly without a search-page request |
+| Existing `source:` gallery tag | Use its `gid/token` directly and skip title search |
+| Existing ASCII `artist:` tag | Add an artist restriction to the normal title search |
 
 Only these HTTPS URL forms are accepted:
 
@@ -29,24 +31,26 @@ https://exhentai.org/g/{gid}/{token}/
 ```
 
 Lookalike hosts, HTTP URLs, userinfo, queries, and fragments are rejected.
+Legacy HTTP addresses found in existing `source:` tags are upgraded to HTTPS and then checked against the same fixed-host rules.
 
-## Quick configuration
+## WebUI configuration
+
+Sign in as an administrator and open **Settings → Site settings → E-Hentai / ExHentai**:
+
+1. Select E-Hentai or ExHentai.
+2. Configure original-title preference, expunged search, and a forced search language as needed.
+3. Enable the EH/EX source and save.
+4. Manually select **E-Hentai / ExHentai** in a comic or series metadata search.
+
+The source switch and non-sensitive options are written to `{DATA_DIR}/site-config.json`. The administrator-only endpoint returns only a configured/not-configured cookie status; cookie contents never enter the WebUI, site configuration, or API responses.
+
+The global **Enable Content Scraping** setting remains the master switch. When it is off, the backend rejects every metadata source, including EH/EX.
+
+## Cookie configuration
 
 ### Public E-Hentai
 
-Public search does not require account cookies:
-
-```yaml
-services:
-  nowen-reader:
-    environment:
-      EHENTAI_ENABLED: "true"
-      EHENTAI_SITE: ehentai
-      EHENTAI_PREFER_ORIGINAL_TITLE: "false"
-      EHENTAI_SEARCH_EXPUNGED: "false"
-```
-
-Restart Nowen Reader, open metadata search for a comic or series, expand the source filter, and manually select **E-Hentai / ExHentai**.
+Public search does not require account cookies or any EH environment variables. Select E-Hentai and enable it in the WebUI.
 
 ### ExHentai
 
@@ -56,30 +60,28 @@ ExHentai requires a matching `ipb_member_id` and `ipb_pass_hash` pair:
 services:
   nowen-reader:
     environment:
-      EHENTAI_ENABLED: "true"
-      EHENTAI_SITE: exhentai
       EHENTAI_IPB_MEMBER_ID: ${EHENTAI_IPB_MEMBER_ID:?set in a protected .env file}
       EHENTAI_IPB_PASS_HASH: ${EHENTAI_IPB_PASS_HASH:?set in a protected .env file}
       EHENTAI_STAR: ${EHENTAI_STAR:-}
       EHENTAI_IGNEOUS: ${EHENTAI_IGNEOUS:-}
-      EHENTAI_PREFER_ORIGINAL_TITLE: "false"
-      EHENTAI_SEARCH_EXPUNGED: "false"
 ```
+
+Restart after setting the environment, then select ExHentai and enable it in the WebUI. The backend rejects an enabled ExHentai configuration unless a valid member ID/pass-hash pair is present.
 
 > [!CAUTION]
 > These cookies are account session credentials. Never commit them, paste them into issues, include them in screenshots or logs, or share them with untrusted people. Prefer a dedicated low-privilege account and rotate cookies regularly. Nowen Reader neither needs nor accepts the EH/EX username or password.
 
-## Configuration reference
+## WebUI option reference
 
-### `EHENTAI_ENABLED`
+### Enable EH/EX
 
 Type: boolean
 
 Default: `false`
 
-Explicitly enables the plugin. An invalid boolean makes the configuration unavailable; it is not treated as `true`.
+Controls whether this source appears in metadata source selectors. It is off by default and remains excluded from automatic and batch scraping defaults even when enabled.
 
-### `EHENTAI_SITE`
+### Search site
 
 Type: string
 
@@ -88,6 +90,26 @@ Default: `ehentai`
 Allowed: `ehentai`, `exhentai`
 
 Selects the site used for title search. ExHentai requires complete login cookies and fails closed instead of silently falling back to public E-Hentai.
+
+### Prefer the original title
+
+Default: off
+
+Prefer API `title_jpn` when available, falling back to the English/romanized title.
+
+### Search expunged galleries
+
+Default: off
+
+Include expunged galleries in title searches. Exact gallery URL and `source:` tag lookups are unaffected.
+
+### Forced search language
+
+Default: unrestricted
+
+Adds a `language:{name}` restriction to normal title searches. The WebUI supplies fixed values; the backend rejects control characters, non-ASCII text, and injected search expressions. E-Hentai itself has limited support for some language restrictions, particularly Japanese.
+
+## Environment variable reference
 
 ### `EHENTAI_IPB_MEMBER_ID`
 
@@ -120,22 +142,6 @@ Type: secret string
 Default: empty
 
 Optional `igneous` cookie for ExHentai sessions that require it.
-
-### `EHENTAI_PREFER_ORIGINAL_TITLE`
-
-Type: boolean
-
-Default: `false`
-
-Prefer API `title_jpn` when available, falling back to the English/romanized title.
-
-### `EHENTAI_SEARCH_EXPUNGED`
-
-Type: boolean
-
-Default: `false`
-
-Include expunged galleries in title searches. Exact gallery URL lookup is unaffected.
 
 ## Cookie acquisition and storage
 
@@ -188,15 +194,14 @@ Additional controls:
 
 Check that:
 
-1. `EHENTAI_ENABLED=true`;
-2. the service was restarted;
-3. EH/EX was manually selected in the source filter;
-4. the title is no longer than 200 search characters;
-5. logs do not report invalid configuration, rate limiting, or rejected authentication.
+1. both the global Content Scraping switch and the EH/EX source switch are enabled;
+2. EH/EX was manually selected in the source filter;
+3. the title is no longer than 200 search characters;
+4. logs do not report invalid configuration, rate limiting, or rejected authentication.
 
 ### ExHentai authentication always fails
 
-- Verify `EHENTAI_SITE=exhentai`.
+- Verify that ExHentai is selected in the WebUI.
 - `ipb_member_id` and `ipb_pass_hash` must come from the same active session.
 - Refresh `igneous` when the session requires it.
 - Enter only cookie values, without cookie names, embedded quotes, or newlines.

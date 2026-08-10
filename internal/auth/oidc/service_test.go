@@ -250,6 +250,32 @@ func TestCancelReturnsLocalTargetAndConsumesTransactionWithoutCodeExchange(t *te
 	}
 }
 
+func TestCancelRejectsTransactionFromChangedConfiguration(t *testing.T) {
+	provider := &fakeProvider{}
+	transactions := &fakeTransactions{}
+	original := oidcauth.NewService(provider, transactions, oidcauth.Options{
+		BasePath: "/reader", TransactionTTL: 5 * time.Minute, ConfigFingerprint: "original",
+	})
+	begin, err := original.Begin(context.Background(), oidcauth.BeginRequest{
+		Purpose: oidcauth.PurposeLogin, ReturnTo: "/reader/settings?tab=account",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := oidcauth.NewService(provider, transactions, oidcauth.Options{
+		BasePath: "/reader", TransactionTTL: 5 * time.Minute, ConfigFingerprint: "replacement",
+	})
+	returnTo, err := replacement.Cancel(context.Background(), oidcauth.CancelRequest{
+		State: provider.state, BindingToken: begin.BindingToken,
+	})
+	if !errors.Is(err, oidcauth.ErrConfigurationChanged) || returnTo != "/reader/settings?tab=account" {
+		t.Fatalf("Cancel() = %q, %v, want safe target and ErrConfigurationChanged", returnTo, err)
+	}
+	if provider.exchanges != 0 || !transactions.consumed {
+		t.Fatalf("stale cancellation exchanged code or stayed replayable: exchanges=%d consumed=%v", provider.exchanges, transactions.consumed)
+	}
+}
+
 func TestCompletePreservesSafeReturnTargetWhenProviderIsUnavailable(t *testing.T) {
 	provider := &fakeProvider{err: oidcauth.ErrProviderUnavailable}
 	transactions := &fakeTransactions{}

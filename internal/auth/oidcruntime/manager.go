@@ -24,6 +24,20 @@ type probeProvider interface {
 
 type ProviderFactory func(oidcauth.RemoteProviderConfig) (probeProvider, error)
 
+type unavailableProvider struct{}
+
+func (unavailableProvider) Issuer() string { return "" }
+
+func (unavailableProvider) Probe(context.Context) error { return oidcauth.ErrProviderUnavailable }
+
+func (unavailableProvider) AuthorizationURL(context.Context, oidcauth.AuthorizationRequest) (string, error) {
+	return "", oidcauth.ErrProviderUnavailable
+}
+
+func (unavailableProvider) Exchange(context.Context, string, string) (oidcauth.VerifiedIdentity, error) {
+	return oidcauth.VerifiedIdentity{}, oidcauth.ErrProviderUnavailable
+}
+
 type Options struct {
 	Source             ConfigSource
 	EnvironmentConfig  config.OIDCConfig
@@ -122,6 +136,15 @@ func (m *Manager) State() State {
 	return state
 }
 
+func (m *Manager) WithStateLease(run StateLease) error {
+	if run == nil {
+		return errors.New("OIDC state lease callback is required")
+	}
+	m.updateMu.RLock()
+	defer m.updateMu.RUnlock()
+	return run(m.State())
+}
+
 func (m *Manager) AdminConfig(ctx context.Context) (AdminConfig, error) {
 	result := m.adminConfigForSnapshot(m.current.Load())
 	if m.source != ConfigSourceDatabase || m.safety == nil || result.Config.IssuerURL == "" {
@@ -142,7 +165,9 @@ func (m *Manager) Begin(ctx context.Context, request oidcauth.BeginRequest) (oid
 	if snapshot == nil || !snapshot.state.Ready || snapshot.service == nil {
 		return oidcauth.AuthorizationRedirect{}, oidcauth.ErrProviderUnavailable
 	}
-	return snapshot.service.Begin(ctx, request)
+	result, err := snapshot.service.Begin(ctx, request)
+	result.CookieSecure = snapshot.state.Config.SecureCookies
+	return result, err
 }
 
 func (m *Manager) BeginConfigTest(ctx context.Context, actorUserID, returnTo string) (oidcauth.AuthorizationRedirect, error) {
@@ -155,9 +180,11 @@ func (m *Manager) BeginConfigTest(ctx context.Context, actorUserID, returnTo str
 	if snapshot == nil || snapshot.service == nil || snapshot.fingerprint == "" {
 		return oidcauth.AuthorizationRedirect{}, ErrConfigurationInvalid
 	}
-	return snapshot.service.Begin(ctx, oidcauth.BeginRequest{
+	result, err := snapshot.service.Begin(ctx, oidcauth.BeginRequest{
 		Purpose: oidcauth.PurposeConfigTest, SessionUserID: actorUserID, ReturnTo: returnTo,
 	})
+	result.CookieSecure = snapshot.state.Config.SecureCookies
+	return result, err
 }
 
 func (m *Manager) Complete(ctx context.Context, request oidcauth.CallbackRequest) (oidcauth.AuthenticatedIdentity, error) {
@@ -349,10 +376,22 @@ func (m *Manager) Apply(ctx context.Context, request UpdateRequest) (result Admi
 	}
 
 	candidate.Revision = current.Revision
-	saved, err := m.repository.Save(ctx, request.ExpectedRevision, candidate, AuditEvent{
-		ActorUserID: request.ActorUserID, Action: "update", Result: "success",
-		ChangedFields: changedFields(current, candidate, request.ClientSecret != nil || request.ClearSecret), RequestID: request.RequestID,
-	})
+	saveRequest := SaveRequest{
+		ExpectedRevision: request.ExpectedRevision,
+		Next:             candidate,
+		Audit: AuditEvent{
+			ActorUserID: request.ActorUserID, Action: "update", Result: "success",
+			ChangedFields: changedFields(current, candidate, request.ClientSecret != nil || request.ClearSecret), RequestID: request.RequestID,
+		},
+		RequireActorPassword: current.Enabled && !candidate.Enabled || candidate.DisablePasswordLogin,
+	}
+	if candidate.Enabled {
+		saveRequest.RequireActorIdentityIssuer = candidate.IssuerURL
+	}
+	if current.Enabled && !candidate.Enabled && !request.ConfirmOIDCOnlyUsers {
+		saveRequest.RequireNoOIDCOnlyUsersIssuer = current.IssuerURL
+	}
+	saved, err := m.repository.Save(ctx, saveRequest)
 	if err != nil {
 		return AdminConfig{}, err
 	}
@@ -457,6 +496,8 @@ func (m *Manager) recordFailureAudit(ctx context.Context, revision int64, actorU
 
 func adminFailureCode(err error) string {
 	switch {
+	case errors.Is(err, ErrAdministratorRequired):
+		return "administrator_required"
 	case errors.Is(err, ErrConfigConflict):
 		return "config_revision_conflict"
 	case errors.Is(err, ErrConfigurationInvalid):
@@ -487,6 +528,7 @@ func (m *Manager) buildSnapshot(cfg config.OIDCConfig, record StoredConfig, conf
 	snapshot := &runtimeSnapshot{record: record, state: State{Config: cloneConfig(cfg), Source: m.source}}
 	if configErr != nil {
 		snapshot.state.ErrorCode = configErrorCode(configErr)
+		m.attachChangedConfigurationRejector(snapshot, buildProvider)
 		return snapshot
 	}
 	fullConfig, fullErr := m.resolveConfigForFingerprint(cfg)
@@ -501,6 +543,7 @@ func (m *Manager) buildSnapshot(cfg config.OIDCConfig, record StoredConfig, conf
 		if cfg.Enabled && fullErr != nil {
 			snapshot.state.ErrorCode = configErrorCode(fullErr)
 		}
+		m.attachChangedConfigurationRejector(snapshot, buildProvider)
 		return snapshot
 	}
 	service, err := m.buildService(cfg, record.Revision, snapshot.fingerprint)
@@ -512,6 +555,19 @@ func (m *Manager) buildSnapshot(cfg config.OIDCConfig, record StoredConfig, conf
 	snapshot.state.Available = true
 	snapshot.state.Ready = cfg.Enabled
 	return snapshot
+}
+
+// A database draft can become incomplete while an older browser transaction
+// is in flight. Keep just enough completion machinery to consume that
+// transaction and report configuration_changed before any token exchange.
+func (m *Manager) attachChangedConfigurationRejector(snapshot *runtimeSnapshot, buildProvider bool) {
+	if !buildProvider || m.source != ConfigSourceDatabase || snapshot.service != nil {
+		return
+	}
+	snapshot.service = oidcauth.NewService(unavailableProvider{}, m.transactions, oidcauth.Options{
+		BasePath: m.basePath, TransactionTTL: 5 * time.Minute, Now: m.now,
+	})
+	snapshot.state.Available = true
 }
 
 func (m *Manager) buildService(cfg config.OIDCConfig, revision int64, fingerprint string) (*oidcauth.Service, error) {

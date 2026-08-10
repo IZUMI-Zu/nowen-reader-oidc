@@ -135,7 +135,6 @@ func UpdateUserAiEnabled(userID string, aiEnabled bool) error {
 	return err
 }
 
-
 // GetUserRole 获取用户角色并写入 role 指针。用于轻量级权限检查。
 func GetUserRole(userID string, role *string) error {
 	return db.QueryRow(`SELECT "role" FROM "User" WHERE "id" = ?`, userID).Scan(role)
@@ -157,10 +156,10 @@ func CreateSession(session *model.UserSession) error {
 	session.CreatedAt = now
 	_, err := db.Exec(
 		`INSERT INTO "UserSession"
-		 ("id", "userId", "expiresAt", "authMethod", "authenticatedAt", "absoluteExpiresAt", "createdAt")
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 ("id", "userId", "expiresAt", "authMethod", "authenticatedAt", "absoluteExpiresAt", "cookieSecure", "createdAt")
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.UserID, session.ExpiresAt, session.AuthMethod,
-		session.AuthenticatedAt, session.AbsoluteExpiresAt, session.CreatedAt,
+		session.AuthenticatedAt, session.AbsoluteExpiresAt, session.CookieSecure, session.CreatedAt,
 	)
 	return err
 }
@@ -171,10 +170,11 @@ func GetSessionWithUser(token string) (*model.UserSession, *model.User, error) {
 	session := &model.UserSession{}
 	user := &model.User{}
 	var absoluteExpiresAt sql.NullTime
+	var cookieSecure sql.NullBool
 
 	err := db.QueryRow(
 		`SELECT s."id", s."userId", s."expiresAt", s."authMethod",
-		        s."authenticatedAt", s."absoluteExpiresAt", s."createdAt",
+		        s."authenticatedAt", s."absoluteExpiresAt", s."cookieSecure", s."createdAt",
 		        u."id", u."username", u."password", u."nickname", u."role", u."aiEnabled", u."createdAt", u."updatedAt"
 		 FROM "UserSession" s
 		 JOIN "User" u ON u."id" = s."userId"
@@ -182,7 +182,7 @@ func GetSessionWithUser(token string) (*model.UserSession, *model.User, error) {
 		token,
 	).Scan(
 		&session.ID, &session.UserID, &session.ExpiresAt, &session.AuthMethod,
-		&session.AuthenticatedAt, &absoluteExpiresAt, &session.CreatedAt,
+		&session.AuthenticatedAt, &absoluteExpiresAt, &cookieSecure, &session.CreatedAt,
 		&user.ID, &user.Username, &user.Password, &user.Nickname, &user.Role, &user.AiEnabled, &user.CreatedAt, &user.UpdatedAt,
 	)
 
@@ -194,6 +194,9 @@ func GetSessionWithUser(token string) (*model.UserSession, *model.User, error) {
 	}
 	if absoluteExpiresAt.Valid {
 		session.AbsoluteExpiresAt = &absoluteExpiresAt.Time
+	}
+	if cookieSecure.Valid {
+		session.CookieSecure = &cookieSecure.Bool
 	}
 	return session, user, nil
 }

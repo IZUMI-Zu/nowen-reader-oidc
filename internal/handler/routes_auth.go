@@ -68,9 +68,9 @@ func registerAuthRoutes(api *gin.RouterGroup) {
 	oidcAdminGroup.Use(middleware.SessionRequired(), middleware.AdminRequired())
 	{
 		oidcAdminGroup.GET("", oidcAdmin.Get)
-		oidcAdminGroup.PUT("", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitAuth(), oidcAdmin.Update)
-		oidcAdminGroup.POST("/probe", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitAuth(), oidcAdmin.Probe)
-		oidcAdminGroup.POST("/test-login", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitAuth(), oidcAdmin.BeginTestLogin)
+		oidcAdminGroup.PUT("", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitStrict(), oidcAdmin.Update)
+		oidcAdminGroup.POST("/probe", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitStrict(), oidcAdmin.Probe)
+		oidcAdminGroup.POST("/test-login", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitStrict(), oidcAdmin.BeginTestLogin)
 	}
 
 }

@@ -18,39 +18,20 @@ import {
 import {
   oidcAdminAPI,
   type OIDCAdminConfig,
-  type OIDCAdminFields,
 } from "@/api/oidc";
 import { apiPath } from "@/lib/base-path";
 import { apiClient, type ApiError } from "@/lib/apiClient";
 import { useAuth } from "@/lib/auth-context";
 import { useLocale } from "@/lib/i18n";
-
-type SensitiveAction = "save" | "probe" | "test";
-
-interface OIDCForm {
-  enabled: boolean;
-  issuerURL: string;
-  clientID: string;
-  providerName: string;
-  scopes: string;
-  publicURL: string;
-  autoProvision: boolean;
-  sessionTTLHours: number;
-  disablePasswordLogin: boolean;
-}
-
-interface OIDCResumeState {
-  version: 1;
-  action: SensitiveAction;
-  revision: number;
-  form: OIDCForm;
-  clearSecret: boolean;
-  confirmOIDCOnlyUsers: boolean;
-  confirmDisablePasswordLogin: boolean;
-  requiresSecretReentry: boolean;
-}
-
-const oidcResumeStorageKey = "nowen-reader:oidc-admin-resume:v1";
+import {
+  consumeOIDCResumeState,
+  storeOIDCResumeState,
+  toOIDCAdminFields,
+  toOIDCAdminForm,
+  type OIDCAdminForm,
+  type OIDCResumeState,
+  type OIDCSensitiveAction,
+} from "@/lib/oidc-admin-state";
 
 const copy = {
   "zh-CN": {
@@ -220,38 +201,6 @@ const statusLabels = {
   },
 } as const;
 
-function toForm(config: OIDCAdminConfig): OIDCForm {
-  return {
-    enabled: config.config.enabled,
-    issuerURL: config.config.issuerURL,
-    clientID: config.config.clientID,
-    providerName: config.config.providerName || "OpenID Connect",
-    scopes: config.config.scopes.join(" ") || "openid profile email",
-    publicURL: config.config.publicURL,
-    autoProvision: config.config.autoProvision,
-    sessionTTLHours: config.config.sessionTTLSeconds > 0 ? config.config.sessionTTLSeconds / 3600 : 12,
-    disablePasswordLogin: config.config.disablePasswordLogin,
-  };
-}
-
-function toFields(form: OIDCForm, ttlInvalidMessage: string): OIDCAdminFields {
-  const sessionTTLSeconds = Math.round(form.sessionTTLHours * 3600);
-  if (!Number.isFinite(form.sessionTTLHours) || sessionTTLSeconds < 300 || sessionTTLSeconds > 2_592_000) {
-    throw new Error(ttlInvalidMessage);
-  }
-  return {
-    enabled: form.enabled,
-    issuerURL: form.issuerURL.trim(),
-    clientID: form.clientID,
-    providerName: form.providerName.trim(),
-    scopes: form.scopes.trim().split(/\s+/).filter(Boolean),
-    publicURL: form.publicURL.trim(),
-    autoProvision: form.autoProvision,
-    sessionTTLSeconds,
-    disablePasswordLogin: form.disablePasswordLogin,
-  };
-}
-
 function isReauthenticationRequired(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "reauth_required";
 }
@@ -261,43 +210,23 @@ function errorMessage(error: unknown, fallback: string): string {
   return candidate && typeof candidate.message === "string" ? candidate.message : fallback;
 }
 
-function readResumeState(raw: string | null): OIDCResumeState | null {
-  if (!raw) return null;
-  try {
-    const value = JSON.parse(raw) as Partial<OIDCResumeState>;
-    const form = value.form as Partial<OIDCForm> | undefined;
-    if (value.version !== 1 || !["save", "probe", "test"].includes(value.action || "") ||
-        typeof value.revision !== "number" || !Number.isInteger(value.revision) || !form ||
-        typeof form.enabled !== "boolean" || typeof form.issuerURL !== "string" ||
-        typeof form.clientID !== "string" || typeof form.providerName !== "string" ||
-        typeof form.scopes !== "string" || typeof form.publicURL !== "string" ||
-        typeof form.autoProvision !== "boolean" || typeof form.sessionTTLHours !== "number" ||
-        typeof form.disablePasswordLogin !== "boolean") {
-      return null;
-    }
-    return value as OIDCResumeState;
-  } catch {
-    return null;
-  }
-}
-
 export function OIDCSettingsPanel() {
   const { locale } = useLocale();
   const { user } = useAuth();
   const text = copy[locale];
   const [serverConfig, setServerConfig] = useState<OIDCAdminConfig | null>(null);
-  const [form, setForm] = useState<OIDCForm | null>(null);
+  const [form, setForm] = useState<OIDCAdminForm | null>(null);
   const [clientSecret, setClientSecret] = useState("");
   const [clearSecret, setClearSecret] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
-  const [busyAction, setBusyAction] = useState<SensitiveAction | "load" | null>("load");
-  const [pendingAction, setPendingAction] = useState<SensitiveAction | null>(null);
+  const [busyAction, setBusyAction] = useState<OIDCSensitiveAction | "load" | null>("load");
+  const [pendingAction, setPendingAction] = useState<OIDCSensitiveAction | null>(null);
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmOIDCOnlyUsers, setConfirmOIDCOnlyUsers] = useState(false);
   const [confirmDisablePasswordLogin, setConfirmDisablePasswordLogin] = useState(false);
-  const [resumeAction, setResumeAction] = useState<SensitiveAction | null>(null);
+  const [resumeAction, setResumeAction] = useState<OIDCSensitiveAction | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setBusyAction("load");
@@ -307,11 +236,10 @@ export function OIDCSettingsPanel() {
       const target = new URL(window.location.href);
       const shouldResume = target.searchParams.has("oidc_admin_resume");
       const callbackError = target.searchParams.get("oidc_error") || "";
-      const resumed = shouldResume ? readResumeState(window.sessionStorage.getItem(oidcResumeStorageKey)) : null;
-      if (shouldResume) window.sessionStorage.removeItem(oidcResumeStorageKey);
+      const resumed = shouldResume ? consumeOIDCResumeState(window) : null;
 
       setServerConfig(result);
-      setForm(resumed && resumed.revision === result.revision ? resumed.form : toForm(result));
+      setForm(resumed && resumed.revision === result.revision ? resumed.form : toOIDCAdminForm(result));
       setClientSecret("");
       setClearSecret(resumed?.revision === result.revision ? resumed.clearSecret : false);
       setConfirmOIDCOnlyUsers(resumed?.revision === result.revision ? resumed.confirmOIDCOnlyUsers : false);
@@ -353,7 +281,7 @@ export function OIDCSettingsPanel() {
     return () => controller.abort();
   }, [load]);
 
-  const requestReauthentication = useCallback((action: SensitiveAction) => {
+  const requestReauthentication = useCallback((action: OIDCSensitiveAction) => {
     if (user?.hasPassword) {
       setPendingAction(action);
       return;
@@ -369,9 +297,10 @@ export function OIDCSettingsPanel() {
       confirmDisablePasswordLogin,
       requiresSecretReentry: clientSecret.length > 0,
     };
-    window.sessionStorage.setItem(oidcResumeStorageKey, JSON.stringify(resume));
     const target = new URL(window.location.href);
-    target.searchParams.set("oidc_admin_resume", "1");
+    if (storeOIDCResumeState(window, resume)) {
+      target.searchParams.set("oidc_admin_resume", "1");
+    }
     const returnTo = target.pathname + target.search + target.hash;
     window.location.assign(`${apiPath("/api/auth/oidc/reauth")}?returnTo=${encodeURIComponent(returnTo)}`);
   }, [clearSecret, clientSecret.length, confirmDisablePasswordLogin, confirmOIDCOnlyUsers, form, serverConfig, user?.hasPassword]);
@@ -391,12 +320,12 @@ export function OIDCSettingsPanel() {
     return known[code] || errorMessage(error, text.errorFallback);
   }, [text]);
 
-  const runAction = useCallback(async (action: SensitiveAction) => {
+  const runAction = useCallback(async (action: OIDCSensitiveAction) => {
     if (!serverConfig || !form) return;
     setBusyAction(action);
     setMessage(null);
     try {
-      const fields = toFields(form, text.ttlInvalid);
+      const fields = toOIDCAdminFields(form, text.ttlInvalid);
       const secret = clientSecret.length > 0 ? clientSecret : undefined;
       if (action === "save") {
         const result = await oidcAdminAPI.update({
@@ -408,7 +337,7 @@ export function OIDCSettingsPanel() {
           confirmDisablePasswordLogin: confirmDisablePasswordLogin || undefined,
         });
         setServerConfig(result);
-        setForm(toForm(result));
+        setForm(toOIDCAdminForm(result));
         setClientSecret("");
         setClearSecret(false);
         setConfirmOIDCOnlyUsers(false);
@@ -469,7 +398,7 @@ export function OIDCSettingsPanel() {
   const protectionText = serverConfig.secretProtection
     ? (serverConfig.secretProtection === "external-key-file" ? text.protectionExternal : text.protectionLocal)
     : "";
-  const set = <K extends keyof OIDCForm>(key: K, value: OIDCForm[K]) => setForm((current) => current ? { ...current, [key]: value } : current);
+  const set = <K extends keyof OIDCAdminForm>(key: K, value: OIDCAdminForm[K]) => setForm((current) => current ? { ...current, [key]: value } : current);
   const disablingActiveOIDC = serverConfig.config.enabled && !form.enabled;
 
   return (

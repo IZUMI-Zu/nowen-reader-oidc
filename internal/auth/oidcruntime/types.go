@@ -13,6 +13,7 @@ var ErrConfigConflict = errors.New("OIDC configuration revision conflict")
 
 var (
 	ErrEnvironmentManaged          = errors.New("OIDC configuration is managed by the environment")
+	ErrAdministratorRequired       = errors.New("OIDC configuration changes require an administrator")
 	ErrConfigurationInvalid        = errors.New("OIDC configuration is invalid")
 	ErrConfigurationUnverified     = errors.New("OIDC configuration has not completed a test login")
 	ErrAdminIdentityRequired       = errors.New("an administrator identity must be linked to the OIDC issuer")
@@ -57,11 +58,24 @@ type AuditEvent struct {
 	RequestID     string
 }
 
+// SaveRequest carries both the proposed record and the authorization facts
+// that must still be true when the repository commits it. Rechecking these
+// predicates in the same write transaction closes races with administrator
+// demotion, identity unlinking, and recovery-password removal.
+type SaveRequest struct {
+	ExpectedRevision             int64
+	Next                         StoredConfig
+	Audit                        AuditEvent
+	RequireActorIdentityIssuer   string
+	RequireActorPassword         bool
+	RequireNoOIDCOnlyUsersIssuer string
+}
+
 // ConfigRepository is the local-substitutable persistence seam. SQLite is the
 // production adapter; manager tests use an in-memory adapter.
 type ConfigRepository interface {
 	Load(ctx context.Context) (StoredConfig, error)
-	Save(ctx context.Context, expectedRevision int64, next StoredConfig, audit AuditEvent) (StoredConfig, error)
+	Save(ctx context.Context, request SaveRequest) (StoredConfig, error)
 	CompleteTest(ctx context.Context, expectedRevision int64, fingerprint string, verifiedAt time.Time, actorUserID string, identity oidcauth.VerifiedIdentity, audit AuditEvent) (StoredConfig, error)
 	RecordAudit(ctx context.Context, revision int64, audit AuditEvent) error
 }
@@ -148,3 +162,8 @@ type ProbeResult struct {
 }
 
 type CompletionFinalizer func(State, oidcauth.AuthenticatedIdentity) error
+
+// StateLease runs a local policy-dependent side effect against one immutable
+// runtime snapshot. Manager holds its read lease until the callback returns,
+// making the side effect linearizable with Apply.
+type StateLease func(State) error

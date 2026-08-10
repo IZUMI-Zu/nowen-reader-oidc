@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/nowen-reader/nowen-reader/internal/auth/oidc"
 	"github.com/nowen-reader/nowen-reader/internal/auth/oidcruntime"
 	"github.com/nowen-reader/nowen-reader/internal/config"
@@ -79,7 +80,7 @@ func (h *OIDCAdminHandler) Update(c *gin.Context) {
 	result, err := h.runtime.Apply(c.Request.Context(), oidcruntime.UpdateRequest{
 		ExpectedRevision:            *body.ExpectedRevision,
 		ActorUserID:                 user.ID,
-		RequestID:                   c.GetHeader("X-Request-ID"),
+		RequestID:                   oidcAuditRequestID(c),
 		Fields:                      *body.Config,
 		ClientSecret:                body.ClientSecret,
 		ClearSecret:                 body.ClearSecret,
@@ -148,7 +149,7 @@ func (h *OIDCAdminHandler) BeginTestLogin(c *gin.Context) {
 		respondOIDCAdminError(c, err)
 		return
 	}
-	h.auth.setOIDCTransactionCookie(c, result.BindingToken, result.ExpiresAt)
+	h.auth.setOIDCTransactionCookie(c, result.BindingToken, result.ExpiresAt, result.CookieSecure)
 	c.JSON(http.StatusOK, gin.H{"authorizationURL": result.URL})
 }
 
@@ -156,9 +157,24 @@ func (h *OIDCAdminHandler) recordFailure(c *gin.Context, actorUserID, action, co
 	if h.runtime == nil {
 		return
 	}
-	if err := h.runtime.RecordAdminFailure(c.Request.Context(), actorUserID, action, c.GetHeader("X-Request-ID"), code); err != nil {
+	if err := h.runtime.RecordAdminFailure(c.Request.Context(), actorUserID, action, oidcAuditRequestID(c), code); err != nil {
 		log.Printf("[Auth] could not persist OIDC admin failure audit")
 	}
+}
+
+const oidcAuditRequestIDContextKey = "oidc-audit-request-id"
+
+// oidcAuditRequestID deliberately does not trust the inbound X-Request-ID.
+// OIDC administration handles secrets, so a client-controlled correlation value
+// must not become an alternate path for writing secret material into the audit log.
+func oidcAuditRequestID(c *gin.Context) string {
+	if requestID, ok := c.Get(oidcAuditRequestIDContextKey); ok {
+		return requestID.(string)
+	}
+	requestID := uuid.NewString()
+	c.Set(oidcAuditRequestIDContextKey, requestID)
+	c.Header("X-Request-ID", requestID)
+	return requestID
 }
 
 func currentOIDCAdminUserID(c *gin.Context) string {
@@ -170,6 +186,8 @@ func currentOIDCAdminUserID(c *gin.Context) string {
 
 func adminOIDCErrorCode(err error) string {
 	switch {
+	case errors.Is(err, oidcruntime.ErrAdministratorRequired):
+		return "administrator_required"
 	case errors.Is(err, oidcruntime.ErrEnvironmentManaged):
 		return "environment_managed"
 	case errors.Is(err, oidcruntime.ErrConfigurationInvalid):
@@ -212,6 +230,8 @@ func respondInvalidOIDCAdminRequest(c *gin.Context, err error) {
 
 func respondOIDCAdminError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, oidcruntime.ErrAdministratorRequired):
+		c.JSON(http.StatusForbidden, gin.H{"error": "Administrator access required", "code": "administrator_required"})
 	case errors.Is(err, oidcruntime.ErrEnvironmentManaged):
 		c.JSON(http.StatusConflict, gin.H{"error": "OIDC configuration is managed by environment variables", "code": "environment_managed"})
 	case errors.Is(err, oidcruntime.ErrConfigConflict):

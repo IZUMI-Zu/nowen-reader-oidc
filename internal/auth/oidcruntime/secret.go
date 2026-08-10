@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -113,7 +114,7 @@ func readOrCreateLocalSecretKey(path string) ([]byte, error) {
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
-		return readSecretKey(path)
+		return readConcurrentlyCreatedSecretKey(path)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("create local OIDC configuration key: %w", err)
@@ -136,6 +137,25 @@ func readOrCreateLocalSecretKey(path string) ([]byte, error) {
 	}
 	written = true
 	return key, nil
+}
+
+func readConcurrentlyCreatedSecretKey(path string) ([]byte, error) {
+	const (
+		attempts = 100
+		delay    = 10 * time.Millisecond
+	)
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		var key []byte
+		key, err = readSecretKey(path)
+		if err == nil {
+			return key, nil
+		}
+		if attempt+1 < attempts {
+			time.Sleep(delay)
+		}
+	}
+	return nil, fmt.Errorf("read concurrently created local OIDC configuration key: %w", err)
 }
 
 func readSecretKey(path string) ([]byte, error) {

@@ -43,6 +43,7 @@ type AuthorizationRedirect struct {
 	URL          string
 	BindingToken string
 	ExpiresAt    time.Time
+	CookieSecure bool
 }
 
 type CallbackRequest struct {
@@ -248,6 +249,9 @@ func (s *Service) Cancel(ctx context.Context, request CancelRequest) (string, er
 			return "", ErrInvalidTransaction
 		}
 		return "", fmt.Errorf("consume cancelled OIDC transaction: %w", err)
+	}
+	if !constantTimeEqual(transaction.ConfigFingerprint, s.configFingerprint) {
+		return transaction.ReturnTo, ErrConfigurationChanged
 	}
 	return transaction.ReturnTo, nil
 }

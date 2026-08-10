@@ -43,11 +43,17 @@ func newAuthHandlerWithRuntime(runtime oidcRuntime) *AuthHandler {
 
 func (r *staticOIDCRuntime) State() oidcruntime.State { return r.state }
 
+func (r *staticOIDCRuntime) WithStateLease(run oidcruntime.StateLease) error {
+	return run(r.State())
+}
+
 func (r *staticOIDCRuntime) Begin(ctx context.Context, request oidcauth.BeginRequest) (oidcauth.AuthorizationRedirect, error) {
 	if r.service == nil {
 		return oidcauth.AuthorizationRedirect{}, oidcauth.ErrProviderUnavailable
 	}
-	return r.service.Begin(ctx, request)
+	result, err := r.service.Begin(ctx, request)
+	result.CookieSecure = r.state.Config.SecureCookies
+	return result, err
 }
 
 func (r *staticOIDCRuntime) Complete(ctx context.Context, request oidcauth.CallbackRequest) (oidcauth.AuthenticatedIdentity, error) {
@@ -86,16 +92,14 @@ func (r *staticOIDCRuntime) RecordAdminFailure(context.Context, string, string, 
 	return nil
 }
 
-func (h *AuthHandler) oidcStatus() gin.H {
-	state := h.oidc.State()
+func oidcStatus(state oidcruntime.State) gin.H {
 	return gin.H{
 		"enabled":     state.Config.Enabled && state.Ready,
 		"displayName": state.Config.ProviderName,
 	}
 }
 
-func (h *AuthHandler) oidcBootstrapReady() bool {
-	state := h.oidc.State()
+func oidcBootstrapReady(state oidcruntime.State) bool {
 	return state.Config.Enabled && state.Ready && state.Config.AutoProvision &&
 		len(state.Config.BootstrapAdminSubjects) > 0
 }
@@ -123,7 +127,7 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC login is temporarily unavailable"})
 		return
 	}
-	h.setOIDCTransactionCookie(c, result.BindingToken, result.ExpiresAt)
+	h.setOIDCTransactionCookie(c, result.BindingToken, result.ExpiresAt, result.CookieSecure)
 	c.Redirect(http.StatusFound, result.URL)
 }
 
@@ -167,7 +171,7 @@ func (h *AuthHandler) beginOIDCForCurrentUser(c *gin.Context, purpose oidcauth.P
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC login is temporarily unavailable"})
 		return
 	}
-	h.setOIDCTransactionCookie(c, result.BindingToken, result.ExpiresAt)
+	h.setOIDCTransactionCookie(c, result.BindingToken, result.ExpiresAt, result.CookieSecure)
 	c.Redirect(http.StatusFound, result.URL)
 }
 
@@ -196,6 +200,10 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 			State: c.Query("state"), BindingToken: binding,
 		})
 		if cancelErr != nil {
+			if errors.Is(cancelErr, oidcauth.ErrConfigurationChanged) {
+				redirectOIDCFailure(c, returnTo, "oidc_configuration_changed")
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "OIDC login transaction is invalid or expired"})
 			return
 		}
@@ -242,7 +250,7 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 			redirectOIDCFailure(c, identity.ReturnTo, "session_mismatch")
 			return
 		}
-		if _, err := h.oidc.CompleteConfigTest(c.Request.Context(), user.ID, c.GetHeader("X-Request-ID"), identity); err != nil {
+		if _, err := h.oidc.CompleteConfigTest(c.Request.Context(), user.ID, oidcAuditRequestID(c), identity); err != nil {
 			if errors.Is(err, oidcauth.ErrConfigurationChanged) || errors.Is(err, oidcruntime.ErrConfigConflict) {
 				redirectOIDCFailure(c, identity.ReturnTo, "oidc_configuration_changed")
 				return
@@ -255,7 +263,7 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 }
 
 func (h *AuthHandler) recordOIDCConfigTestFailure(c *gin.Context, actorUserID, code string) {
-	if err := h.oidc.RecordAdminFailure(c.Request.Context(), actorUserID, "verify", c.GetHeader("X-Request-ID"), code); err != nil {
+	if err := h.oidc.RecordAdminFailure(c.Request.Context(), actorUserID, "verify", oidcAuditRequestID(c), code); err != nil {
 		log.Printf("[Auth] could not persist OIDC configuration-test failure audit")
 	}
 }
@@ -344,8 +352,12 @@ func (h *AuthHandler) OIDCUnlink(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Browser session required"})
 		return
 	}
-	oidcConfig := h.oidc.State().Config
-	if err := store.UnlinkOIDCIdentity(c.Request.Context(), user.ID, oidcConfig.IssuerURL, !oidcConfig.DisablePasswordLogin); err != nil {
+	var oidcConfig config.OIDCConfig
+	err := h.oidc.WithStateLease(func(state oidcruntime.State) error {
+		oidcConfig = state.Config
+		return store.UnlinkOIDCIdentity(c.Request.Context(), user.ID, oidcConfig.IssuerURL, !oidcConfig.DisablePasswordLogin)
+	})
+	if err != nil {
 		if errors.Is(err, store.ErrOIDCWouldLockOut) {
 			message := "Set a local password before unlinking the last external login"
 			if oidcConfig.DisablePasswordLogin {
@@ -398,9 +410,10 @@ func (h *AuthHandler) issueSession(c *gin.Context, userID, authMethod string, ab
 		}
 	}
 	token := uuid.NewString()
+	cookieSecure := secure
 	if err := store.CreateSession(&model.UserSession{
 		ID: token, UserID: userID, ExpiresAt: expiresAt, AuthMethod: authMethod,
-		AuthenticatedAt: now, AbsoluteExpiresAt: absoluteExpiresAt,
+		AuthenticatedAt: now, AbsoluteExpiresAt: absoluteExpiresAt, CookieSecure: &cookieSecure,
 	}); err != nil {
 		return err
 	}
@@ -408,14 +421,14 @@ func (h *AuthHandler) issueSession(c *gin.Context, userID, authMethod string, ab
 	return nil
 }
 
-func (h *AuthHandler) setOIDCTransactionCookie(c *gin.Context, value string, expiresAt time.Time) {
+func (h *AuthHandler) setOIDCTransactionCookie(c *gin.Context, value string, expiresAt time.Time, secure bool) {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < 1 {
 		maxAge = 1
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name: OIDCTransactionCookie, Value: value, Path: config.JoinBasePath("/api/auth/oidc"),
-		MaxAge: maxAge, Expires: expiresAt, HttpOnly: true, Secure: h.oidc.State().Config.SecureCookies,
+		MaxAge: maxAge, Expires: expiresAt, HttpOnly: true, Secure: secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

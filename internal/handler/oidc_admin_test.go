@@ -70,6 +70,7 @@ func TestOIDCAdminAPIStoresButNeverReturnsClientSecret(t *testing.T) {
 	}`
 	request := httptest.NewRequest(http.MethodPut, "/reader/api/admin/oidc", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-ID", "super-secret-value")
 	request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "admin-session"})
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
@@ -78,6 +79,17 @@ func TestOIDCAdminAPIStoresButNeverReturnsClientSecret(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "super-secret-value") || strings.Contains(response.Body.String(), "secretCiphertext") {
 		t.Fatalf("PUT response exposed secret material: %s", response.Body.String())
+	}
+	serverRequestID := response.Header().Get("X-Request-ID")
+	if serverRequestID == "" || serverRequestID == "super-secret-value" {
+		t.Fatalf("audit request ID was not server generated: %q", serverRequestID)
+	}
+	var auditRequestID string
+	if err := store.DB().QueryRow(`SELECT "requestID" FROM "OIDCConfigAudit" WHERE "result" = 'success' ORDER BY "createdAt" DESC LIMIT 1`).Scan(&auditRequestID); err != nil {
+		t.Fatalf("load success audit request ID: %v", err)
+	}
+	if auditRequestID != serverRequestID || strings.Contains(auditRequestID, "super-secret-value") {
+		t.Fatalf("stored audit request ID = %q, response request ID = %q", auditRequestID, serverRequestID)
 	}
 	var updated map[string]any
 	if err := json.Unmarshal(response.Body.Bytes(), &updated); err != nil {
@@ -164,13 +176,15 @@ func TestOIDCAdminAPIStoresButNeverReturnsClientSecret(t *testing.T) {
 func TestOIDCAdminAPIRequiresAdministratorBrowserSession(t *testing.T) {
 	t.Setenv("OIDC_CONFIG_MODE", "database")
 	t.Setenv("DATA_DIR", t.TempDir())
-	if err := store.InitDB(filepath.Join(t.TempDir(), "oidc-admin-access.db")); err != nil {
-		t.Fatalf("InitDB() error = %v", err)
-	}
+	router := setupTestRouter(t)
 	if err := store.RunMigrations(); err != nil {
 		t.Fatalf("RunMigrations() error = %v", err)
 	}
-	t.Cleanup(store.CloseDB)
+	adminCookie := registerAndLogin(t, router)
+	admin, err := store.GetUserByUsername("admin")
+	if err != nil || admin == nil {
+		t.Fatalf("load administrator: %+v, %v", admin, err)
+	}
 	user := &model.User{ID: "regular", Username: "regular", Password: "hash", Nickname: "Regular", Role: "user"}
 	if err := store.CreateUser(user); err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -181,16 +195,6 @@ func TestOIDCAdminAPIRequiresAdministratorBrowserSession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession() error = %v", err)
 	}
-	runtime, err := NewOIDCRuntime()
-	if err != nil {
-		t.Fatalf("NewOIDCRuntime() error = %v", err)
-	}
-	handler := NewOIDCAdminHandler(runtime, newAuthHandlerWithRuntime(runtime))
-	router := gin.New()
-	group := router.Group("/api/admin/oidc")
-	group.Use(middleware.SessionRequired(), middleware.AdminRequired())
-	group.GET("", handler.Get)
-
 	unauthenticated := httptest.NewRecorder()
 	router.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/admin/oidc", nil))
 	if unauthenticated.Code != http.StatusUnauthorized {
@@ -202,5 +206,45 @@ func TestOIDCAdminAPIRequiresAdministratorBrowserSession(t *testing.T) {
 	router.ServeHTTP(forbidden, request)
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("regular user status = %d", forbidden.Code)
+	}
+
+	_, apiKey, err := store.CreateAPIKey(admin.ID, "OIDC admin boundary", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	apiKeyResponse := performCredentialRequest(router, http.MethodGet, "/api/admin/oidc", nil, "", apiKey)
+	if apiKeyResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("API key status = %d, want 401: %s", apiKeyResponse.Code, apiKeyResponse.Body.String())
+	}
+
+	if err := store.CreateSession(&model.UserSession{
+		ID: "stale-admin-session", UserID: admin.ID, ExpiresAt: time.Now().Add(time.Hour),
+		AuthMethod: model.SessionAuthMethodPassword, AuthenticatedAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateSession(stale admin) error = %v", err)
+	}
+	for _, request := range []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{method: http.MethodPut, path: "/api/admin/oidc", body: map[string]any{}},
+		{method: http.MethodPost, path: "/api/admin/oidc/probe", body: map[string]any{}},
+		{method: http.MethodPost, path: "/api/admin/oidc/test-login"},
+	} {
+		response := performAuthedRequest(router, request.method, request.path, request.body, "stale-admin-session")
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), "reauth_required") {
+			t.Fatalf("stale session %s %s = %d: %s", request.method, request.path, response.Code, response.Body.String())
+		}
+	}
+
+	for attempt := 1; attempt <= 21; attempt++ {
+		response := performAuthedRequest(router, http.MethodPost, "/api/admin/oidc/probe", map[string]any{}, adminCookie)
+		if attempt <= 20 && response.Code == http.StatusTooManyRequests {
+			t.Fatalf("strict limiter rejected request %d too early", attempt)
+		}
+		if attempt == 21 && response.Code != http.StatusTooManyRequests {
+			t.Fatalf("strict limiter request 21 = %d, want 429: %s", response.Code, response.Body.String())
+		}
 	}
 }

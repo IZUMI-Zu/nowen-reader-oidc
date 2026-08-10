@@ -84,32 +84,29 @@ func TestOIDCSlidingRenewalIsCappedAtAbsoluteExpiry(t *testing.T) {
 	}
 }
 
-func TestOIDCSessionRenewalKeepsSecureCookieWhenConfigIsInvalid(t *testing.T) {
-	t.Setenv("OIDC_ENABLED", "true")
-	t.Setenv("OIDC_DISABLE_PASSWORD_LOGIN", "true")
-	t.Setenv("OIDC_ISSUER_URL", "https://identity.example.com")
-	t.Setenv("OIDC_CLIENT_ID", "client")
-	t.Setenv("OIDC_CLIENT_SECRET", "")
-	t.Setenv("PUBLIC_URL", "https://reader.example.com")
-
+func TestOIDCSessionRenewalPreservesIssuedSecureCookiePolicy(t *testing.T) {
 	r := setupSessionMiddlewareTest(t)
 	now := time.Now().UTC()
 	absolute := now.Add(2 * time.Hour)
+	secure := true
 	if err := store.CreateSession(&model.UserSession{
 		ID: "secure-oidc", UserID: "user", ExpiresAt: now.Add(time.Hour), AuthMethod: model.SessionAuthMethodOIDC,
-		AuthenticatedAt: now, AbsoluteExpiresAt: &absolute,
+		AuthenticatedAt: now, AbsoluteExpiresAt: &absolute, CookieSecure: &secure,
 	}); err != nil {
 		t.Fatalf("CreateSession() error = %v", err)
 	}
 
-	response := performSessionRequest(r, "secure-oidc")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/protected", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: "secure-oidc"})
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("valid session status = %d, want 204", response.Code)
 	}
 	for _, cookie := range response.Result().Cookies() {
 		if cookie.Name == SessionCookie {
 			if !cookie.Secure {
-				t.Fatal("OIDC renewal downgraded the session cookie after a configuration error")
+				t.Fatal("OIDC renewal ignored the cookie policy captured when the session was issued")
 			}
 			return
 		}

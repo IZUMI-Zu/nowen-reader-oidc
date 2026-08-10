@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAESGCMSecretProtectorRoundTripUsesRandomNonceAndRejectsTampering(t *testing.T) {
@@ -38,6 +39,30 @@ func TestAESGCMSecretProtectorRoundTripUsesRandomNonceAndRejectsTampering(t *tes
 	tampered := first[:len(first)-1] + replacement
 	if _, err := protector.Decrypt(tampered); err == nil {
 		t.Fatal("Decrypt() accepted tampered ciphertext")
+	}
+}
+
+func TestReadConcurrentlyCreatedSecretKeyWaitsForCompleteFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oidc-config.key")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan error, 1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, writeErr := file.Write([]byte("0123456789abcdef0123456789abcdef"))
+		if writeErr == nil {
+			writeErr = file.Close()
+		}
+		written <- writeErr
+	}()
+	key, err := readConcurrentlyCreatedSecretKey(path)
+	if err != nil || string(key) != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("readConcurrentlyCreatedSecretKey() = %q, %v", key, err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
 	}
 }
 

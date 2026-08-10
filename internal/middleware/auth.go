@@ -289,6 +289,9 @@ func getCurrentSessionUser(c *gin.Context) *model.AuthUser {
 		if newExpiry.After(session.ExpiresAt) && store.RenewSession(token, newExpiry) == nil {
 			maxAge := int(newExpiry.Sub(now).Seconds())
 			secure := session.AuthMethod == model.SessionAuthMethodOIDC && (IsRequestSecure(c) || !isLoopbackRequest(c))
+			if session.AuthMethod == model.SessionAuthMethodOIDC && session.CookieSecure != nil {
+				secure = *session.CookieSecure
+			}
 			SetSessionCookieWithOptions(c, token, maxAge, secure)
 		}
 	}

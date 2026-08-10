@@ -3,6 +3,7 @@ package oidcruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -17,6 +18,7 @@ import (
 type memoryConfigRepository struct {
 	mu               sync.Mutex
 	record           StoredConfig
+	actorIsAdmin     bool
 	adminLinked      bool
 	actorHasPassword bool
 	oidcOnlyUsers    int64
@@ -41,7 +43,7 @@ func TestProtocolFingerprintUsesOpaqueSecretVersionNotPlaintextSecret(t *testing
 func newMemoryConfigRepository() *memoryConfigRepository {
 	return &memoryConfigRepository{record: StoredConfig{
 		ProviderName: "OpenID Connect", Scopes: "openid profile email", SessionTTLSeconds: 43200,
-	}}
+	}, actorIsAdmin: true}
 }
 
 func (r *memoryConfigRepository) Load(context.Context) (StoredConfig, error) {
@@ -50,15 +52,29 @@ func (r *memoryConfigRepository) Load(context.Context) (StoredConfig, error) {
 	return cloneStoredConfig(r.record), nil
 }
 
-func (r *memoryConfigRepository) Save(_ context.Context, expected int64, next StoredConfig, audit AuditEvent) (StoredConfig, error) {
+func (r *memoryConfigRepository) Save(_ context.Context, request SaveRequest) (StoredConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.record.Revision != expected {
+	if r.record.Revision != request.ExpectedRevision {
 		return StoredConfig{}, ErrConfigConflict
 	}
-	next.Revision = expected + 1
+	if !r.actorIsAdmin {
+		return StoredConfig{}, ErrAdministratorRequired
+	}
+	if request.RequireActorIdentityIssuer != "" && !r.adminLinked {
+		return StoredConfig{}, ErrAdminIdentityRequired
+	}
+	if request.RequireActorPassword && !r.actorHasPassword {
+		return StoredConfig{}, ErrBreakGlassPasswordRequired
+	}
+	if request.RequireNoOIDCOnlyUsersIssuer != "" && r.oidcOnlyUsers > 0 {
+		return StoredConfig{}, ErrOIDCOnlyUsersConfirmation
+	}
+	next := request.Next
+	next.UpdatedBy = request.Audit.ActorUserID
+	next.Revision = request.ExpectedRevision + 1
 	r.record = cloneStoredConfig(next)
-	r.audits = append(r.audits, audit)
+	r.audits = append(r.audits, request.Audit)
 	return cloneStoredConfig(r.record), nil
 }
 
@@ -158,10 +174,11 @@ func (s *memoryTransactionStore) Consume(_ context.Context, stateHash, bindingHa
 }
 
 type fakeProbeProvider struct {
-	issuer string
-	mu     sync.Mutex
-	nonce  string
-	probes int
+	issuer   string
+	clientID string
+	mu       sync.Mutex
+	nonce    string
+	probes   int
 }
 
 func (p *fakeProbeProvider) Issuer() string { return p.issuer }
@@ -177,7 +194,7 @@ func (p *fakeProbeProvider) AuthorizationURL(_ context.Context, request oidcauth
 	p.mu.Lock()
 	p.nonce = request.Nonce
 	p.mu.Unlock()
-	return "https://identity.example.com/authorize?state=" + url.QueryEscape(request.State), nil
+	return "https://identity.example.com/authorize?state=" + url.QueryEscape(request.State) + "&client_id=" + url.QueryEscape(p.clientID), nil
 }
 
 func (p *fakeProbeProvider) Exchange(context.Context, string, string) (oidcauth.VerifiedIdentity, error) {
@@ -375,21 +392,95 @@ func TestCompleteConfigTestCannotVerifyOrBindAChangedProtocolConfig(t *testing.T
 	}
 }
 
-func TestCompleteAndFinalizeBlocksConfigurationApplyUntilLocalSideEffectsFinish(t *testing.T) {
+func TestIncompleteReplacementDraftStillRejectsOldTransactionAsConfigurationChanged(t *testing.T) {
+	repository := newMemoryConfigRepository()
+	repository.adminLinked = true
+	repository.actorHasPassword = true
 	transactions := &memoryTransactionStore{}
-	now := time.Unix(1_700_000_000, 0).UTC()
+	protector, err := NewAESGCMSecretProtector([]byte("0123456789abcdef0123456789abcdef"), SecretProtectionExternalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	manager, err := NewManager(context.Background(), Options{
-		Source: ConfigSourceEnvironment,
-		EnvironmentConfig: config.OIDCConfig{
-			Enabled: true, IssuerURL: "https://identity.example.com", ClientID: "client", ClientSecret: "secret",
-			PublicURL: "https://reader.example.com", CallbackURL: "https://reader.example.com/reader/api/auth/oidc/callback",
-			Scopes: []string{"openid"}, SessionAbsoluteTTL: 12 * time.Hour,
-		},
-		Transactions: transactions, BasePath: "/reader", Now: func() time.Time { return now },
+		Source: ConfigSourceDatabase, Repository: repository, Safety: repository, Transactions: transactions,
+		Protector: protector, BasePath: "/reader",
 		ProviderFactory: func(cfg oidcauth.RemoteProviderConfig) (probeProvider, error) {
-			return &fakeProbeProvider{issuer: cfg.IssuerURL}, nil
+			return &fakeProbeProvider{issuer: cfg.IssuerURL, clientID: cfg.ClientID}, nil
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "secret"
+	fields := AdminFields{
+		IssuerURL: "https://identity.example.com", ClientID: "client", ProviderName: "Original",
+		Scopes: []string{"openid"}, PublicURL: "https://reader.example.com", SessionTTLSeconds: 43200,
+	}
+	if _, err := manager.Apply(context.Background(), UpdateRequest{
+		ExpectedRevision: 0, ActorUserID: "admin", Fields: fields, ClientSecret: &secret,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	begin, err := manager.BeginConfigTest(context.Background(), "admin", "/reader/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizationURL, err := url.Parse(begin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Apply(context.Background(), UpdateRequest{
+		ExpectedRevision: 1,
+		ActorUserID:      "admin",
+		Fields:           AdminFields{ProviderName: "Cleared", Scopes: []string{"openid"}, SessionTTLSeconds: 43200},
+		ClearSecret:      true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Complete(context.Background(), oidcauth.CallbackRequest{
+		State: authorizationURL.Query().Get("state"), Code: "code", BindingToken: begin.BindingToken,
+	}); !errors.Is(err, oidcauth.ErrConfigurationChanged) {
+		t.Fatalf("old transaction error = %v, want ErrConfigurationChanged", err)
+	}
+}
+
+func TestDatabaseApplyWaitsForCallbackFinalizationAndPublishesOneSnapshot(t *testing.T) {
+	repository := newMemoryConfigRepository()
+	repository.adminLinked = true
+	repository.actorHasPassword = true
+	transactions := &memoryTransactionStore{}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	protector, err := NewAESGCMSecretProtector([]byte("0123456789abcdef0123456789abcdef"), SecretProtectionExternalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, keyID, err := protector.Encrypt([]byte("secret-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialConfig := config.OIDCConfig{
+		Enabled: true, IssuerURL: "https://identity.example.com", ClientID: "client-a", ClientSecret: "secret-a",
+		ProviderName: "Original", PublicURL: "https://reader.example.com",
+		CallbackURL: "https://reader.example.com/reader/api/auth/oidc/callback",
+		Scopes:      []string{"openid"}, SessionAbsoluteTTL: 12 * time.Hour,
+	}
+	repository.record = StoredConfig{
+		Enabled: true, IssuerURL: initialConfig.IssuerURL, ClientID: initialConfig.ClientID,
+		SecretCiphertext: ciphertext, SecretKeyID: keyID, ProviderName: initialConfig.ProviderName,
+		Scopes: "openid", PublicURL: initialConfig.PublicURL, SessionTTLSeconds: 43200, Revision: 1,
+		VerifiedFingerprint: protocolFingerprint(initialConfig, "/reader", ciphertext),
+	}
+	manager, err := NewManager(context.Background(), Options{
+		Source: ConfigSourceDatabase, Repository: repository, Safety: repository,
+		Transactions: transactions, Protector: protector, BasePath: "/reader", Now: func() time.Time { return now },
+		ProviderFactory: func(cfg oidcauth.RemoteProviderConfig) (probeProvider, error) {
+			return &fakeProbeProvider{issuer: cfg.IssuerURL, clientID: cfg.ClientID}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleBegin, err := manager.Begin(context.Background(), oidcauth.BeginRequest{Purpose: oidcauth.PurposeLogin, ReturnTo: "/reader/stale"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +498,10 @@ func TestCompleteAndFinalizeBlocksConfigurationApplyUntilLocalSideEffectsFinish(
 	go func() {
 		_, completeErr := manager.CompleteAndFinalize(context.Background(), oidcauth.CallbackRequest{
 			State: authorizationURL.Query().Get("state"), Code: "valid-code", BindingToken: begin.BindingToken,
-		}, func(State, oidcauth.AuthenticatedIdentity) error {
+		}, func(state State, _ oidcauth.AuthenticatedIdentity) error {
+			if !state.Config.Enabled || state.Config.ClientID != "client-a" || state.Config.ProviderName != "Original" {
+				return fmt.Errorf("callback observed mixed configuration: %+v", state.Config)
+			}
 			close(entered)
 			<-release
 			return nil
@@ -417,7 +511,14 @@ func TestCompleteAndFinalizeBlocksConfigurationApplyUntilLocalSideEffectsFinish(
 	<-entered
 	applyDone := make(chan error, 1)
 	go func() {
-		_, applyErr := manager.Apply(context.Background(), UpdateRequest{})
+		_, applyErr := manager.Apply(context.Background(), UpdateRequest{
+			ExpectedRevision: 1,
+			ActorUserID:      "admin",
+			Fields: AdminFields{
+				Enabled: false, IssuerURL: initialConfig.IssuerURL, ClientID: "client-b", ProviderName: "Replacement",
+				Scopes: []string{"openid"}, PublicURL: initialConfig.PublicURL, SessionTTLSeconds: 43200,
+			},
+		})
 		applyDone <- applyErr
 	}()
 	select {
@@ -429,8 +530,68 @@ func TestCompleteAndFinalizeBlocksConfigurationApplyUntilLocalSideEffectsFinish(
 	if err := <-completeDone; err != nil {
 		t.Fatalf("CompleteAndFinalize() error = %v", err)
 	}
+	if err := <-applyDone; err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	state := manager.State()
+	if state.Config.Enabled || state.Config.ClientID != "client-b" || state.Config.ProviderName != "Replacement" || state.Ready {
+		t.Fatalf("published state = %+v", state)
+	}
+	staleURL, err := url.Parse(staleBegin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Complete(context.Background(), oidcauth.CallbackRequest{
+		State: staleURL.Query().Get("state"), Code: "valid-code", BindingToken: staleBegin.BindingToken,
+	}); !errors.Is(err, oidcauth.ErrConfigurationChanged) {
+		t.Fatalf("stale transaction error = %v, want ErrConfigurationChanged", err)
+	}
+	newBegin, err := manager.BeginConfigTest(context.Background(), "admin", "/reader/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newURL, err := url.Parse(newBegin.URL)
+	if err != nil || newURL.Query().Get("client_id") != "client-b" {
+		t.Fatalf("new transaction used mixed provider: %q, %v", newBegin.URL, err)
+	}
+}
+
+func TestApplyWaitsForGenericStateLease(t *testing.T) {
+	manager, err := NewManager(context.Background(), Options{
+		Source:            ConfigSourceEnvironment,
+		EnvironmentConfig: config.OIDCConfig{},
+		Transactions:      &memoryTransactionStore{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	leaseDone := make(chan error, 1)
+	go func() {
+		leaseDone <- manager.WithStateLease(func(State) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	applyDone := make(chan error, 1)
+	go func() {
+		_, applyErr := manager.Apply(context.Background(), UpdateRequest{})
+		applyDone <- applyErr
+	}()
+	select {
+	case applyErr := <-applyDone:
+		t.Fatalf("Apply bypassed active state lease: %v", applyErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-leaseDone; err != nil {
+		t.Fatal(err)
+	}
 	if err := <-applyDone; !errors.Is(err, ErrEnvironmentManaged) {
-		t.Fatalf("Apply() error = %v, want ErrEnvironmentManaged", err)
+		t.Fatalf("Apply() error = %v, want ErrEnvironmentManaged after lease release", err)
 	}
 }
 

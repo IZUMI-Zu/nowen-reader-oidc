@@ -32,9 +32,7 @@ func (OIDCConfigStore) Load(ctx context.Context) (oidcruntime.StoredConfig, erro
 
 func (OIDCConfigStore) Save(
 	ctx context.Context,
-	expectedRevision int64,
-	next oidcruntime.StoredConfig,
-	audit oidcruntime.AuditEvent,
+	request oidcruntime.SaveRequest,
 ) (oidcruntime.StoredConfig, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -42,6 +40,7 @@ func (OIDCConfigStore) Save(
 	}
 	defer tx.Rollback()
 
+	next := request.Next
 	updatedAt := next.UpdatedAt.UTC()
 	if next.UpdatedAt.IsZero() {
 		updatedAt = time.Now().UTC()
@@ -51,11 +50,28 @@ func (OIDCConfigStore) Save(
 		"providerName" = ?, "scopes" = ?, "publicURL" = ?, "autoProvision" = ?, "sessionTTLSeconds" = ?,
 		"disablePasswordLogin" = ?, "verifiedFingerprint" = ?, "lastVerifiedAt" = ?,
 		"updatedBy" = ?, "updatedAt" = ?, "revision" = "revision" + 1
-		WHERE "id" = 1 AND "revision" = ?`,
+		WHERE "id" = 1 AND "revision" = ?
+			AND EXISTS (SELECT 1 FROM "User" WHERE "id" = ? AND "role" = 'admin')
+			AND (? = '' OR EXISTS (
+				SELECT 1 FROM "ExternalIdentity"
+				WHERE "userId" = ? AND "issuer" = ?
+			))
+			AND (? = 0 OR EXISTS (
+				SELECT 1 FROM "User" WHERE "id" = ? AND "password" <> ''
+			))
+			AND (? = '' OR NOT EXISTS (
+				SELECT 1 FROM "User" user
+				JOIN "ExternalIdentity" identity ON identity."userId" = user."id"
+				WHERE identity."issuer" = ? AND user."password" = ''
+			))`,
 		next.Enabled, next.IssuerURL, next.ClientID, next.SecretCiphertext, next.SecretKeyID,
 		next.ProviderName, next.Scopes, next.PublicURL, next.AutoProvision, next.SessionTTLSeconds,
 		next.DisablePasswordLogin, next.VerifiedFingerprint, nullableTime(next.LastVerifiedAt),
-		next.UpdatedBy, updatedAt, expectedRevision,
+		request.Audit.ActorUserID, updatedAt, request.ExpectedRevision,
+		request.Audit.ActorUserID,
+		request.RequireActorIdentityIssuer, request.Audit.ActorUserID, request.RequireActorIdentityIssuer,
+		request.RequireActorPassword, request.Audit.ActorUserID,
+		request.RequireNoOIDCOnlyUsersIssuer, request.RequireNoOIDCOnlyUsersIssuer,
 	)
 	if err != nil {
 		return oidcruntime.StoredConfig{}, err
@@ -65,13 +81,13 @@ func (OIDCConfigStore) Save(
 		return oidcruntime.StoredConfig{}, err
 	}
 	if rows != 1 {
-		return oidcruntime.StoredConfig{}, oidcruntime.ErrConfigConflict
+		return oidcruntime.StoredConfig{}, diagnoseOIDCConfigSaveRejection(ctx, tx, request)
 	}
 	saved, err := loadOIDCConfigRow(ctx, tx)
 	if err != nil {
 		return oidcruntime.StoredConfig{}, err
 	}
-	if err := insertOIDCConfigAudit(ctx, tx, saved.Revision, audit); err != nil {
+	if err := insertOIDCConfigAudit(ctx, tx, saved.Revision, request.Audit); err != nil {
 		return oidcruntime.StoredConfig{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -127,7 +143,7 @@ func (OIDCConfigStore) CompleteTest(
 			"updatedBy" = ?, "updatedAt" = ?
 		WHERE "id" = 1 AND "revision" = ?
 			AND EXISTS (SELECT 1 FROM "User" WHERE "id" = ? AND "role" = 'admin')`,
-		fingerprint, verifiedAt.UTC(), audit.ActorUserID, verifiedAt.UTC(), expectedRevision, actorUserID,
+		fingerprint, verifiedAt.UTC(), actorUserID, verifiedAt.UTC(), expectedRevision, actorUserID,
 	)
 	if err != nil {
 		return oidcruntime.StoredConfig{}, err
@@ -142,7 +158,7 @@ func (OIDCConfigStore) CompleteTest(
 			return oidcruntime.StoredConfig{}, err
 		}
 		if administratorExists != 1 {
-			return oidcruntime.StoredConfig{}, oidcruntime.ErrAdminIdentityRequired
+			return oidcruntime.StoredConfig{}, oidcruntime.ErrAdministratorRequired
 		}
 		return oidcruntime.StoredConfig{}, oidcruntime.ErrConfigConflict
 	}
@@ -154,6 +170,7 @@ func (OIDCConfigStore) CompleteTest(
 	if err != nil {
 		return oidcruntime.StoredConfig{}, err
 	}
+	audit.ActorUserID = actorUserID
 	if err := insertOIDCConfigAudit(ctx, tx, saved.Revision, audit); err != nil {
 		return oidcruntime.StoredConfig{}, err
 	}
@@ -161,6 +178,55 @@ func (OIDCConfigStore) CompleteTest(
 		return oidcruntime.StoredConfig{}, err
 	}
 	return saved, nil
+}
+
+func diagnoseOIDCConfigSaveRejection(ctx context.Context, tx *sql.Tx, request oidcruntime.SaveRequest) error {
+	var revision int64
+	if err := tx.QueryRowContext(ctx, `SELECT "revision" FROM "OIDCProviderConfig" WHERE "id" = 1`).Scan(&revision); err != nil {
+		return err
+	}
+	if revision != request.ExpectedRevision {
+		return oidcruntime.ErrConfigConflict
+	}
+	var administratorExists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM "User" WHERE "id" = ? AND "role" = 'admin'`, request.Audit.ActorUserID).Scan(&administratorExists); err != nil {
+		return err
+	}
+	if administratorExists != 1 {
+		return oidcruntime.ErrAdministratorRequired
+	}
+	if request.RequireActorIdentityIssuer != "" {
+		var linked int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM "ExternalIdentity"
+			WHERE "userId" = ? AND "issuer" = ?`, request.Audit.ActorUserID, request.RequireActorIdentityIssuer).Scan(&linked); err != nil {
+			return err
+		}
+		if linked != 1 {
+			return oidcruntime.ErrAdminIdentityRequired
+		}
+	}
+	if request.RequireActorPassword {
+		var hasPassword int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM "User" WHERE "id" = ? AND "password" <> ''`, request.Audit.ActorUserID).Scan(&hasPassword); err != nil {
+			return err
+		}
+		if hasPassword != 1 {
+			return oidcruntime.ErrBreakGlassPasswordRequired
+		}
+	}
+	if request.RequireNoOIDCOnlyUsersIssuer != "" {
+		var affected int64
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT user."id")
+			FROM "User" user
+			JOIN "ExternalIdentity" identity ON identity."userId" = user."id"
+			WHERE identity."issuer" = ? AND user."password" = ''`, request.RequireNoOIDCOnlyUsersIssuer).Scan(&affected); err != nil {
+			return err
+		}
+		if affected > 0 {
+			return oidcruntime.ErrOIDCOnlyUsersConfirmation
+		}
+	}
+	return oidcruntime.ErrConfigConflict
 }
 
 type oidcConfigQueryer interface {

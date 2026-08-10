@@ -34,6 +34,7 @@ type oidcLoginService interface {
 type oidcRuntime interface {
 	oidcLoginService
 	State() oidcruntime.State
+	WithStateLease(run oidcruntime.StateLease) error
 	CompleteAndFinalize(ctx context.Context, request oidcauth.CallbackRequest, finalize oidcruntime.CompletionFinalizer) (oidcauth.AuthenticatedIdentity, error)
 	CompleteConfigTest(ctx context.Context, actorUserID, requestID string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error)
 	RecordAdminFailure(ctx context.Context, actorUserID, action, requestID, code string) error
@@ -88,7 +89,14 @@ func NewOIDCRuntime() (*oidcruntime.Manager, error) {
 
 // Register handles POST /api/auth/register
 func (h *AuthHandler) Register(c *gin.Context) {
-	if !h.requirePasswordLoginEnabled(c) {
+	_ = h.oidc.WithStateLease(func(state oidcruntime.State) error {
+		h.registerWithState(c, state)
+		return nil
+	})
+}
+
+func (h *AuthHandler) registerWithState(c *gin.Context, state oidcruntime.State) {
+	if !passwordLoginEnabled(c, state) {
 		return
 	}
 	var req struct {
@@ -131,7 +139,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Registration requires an invitation from admin"})
 			return
 		}
-	} else if h.oidcBootstrapReady() {
+	} else if oidcBootstrapReady(state) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "The first administrator must sign in through the configured OIDC bootstrap identity"})
 		return
 	}
@@ -199,7 +207,14 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 // Login handles POST /api/auth/login
 func (h *AuthHandler) Login(c *gin.Context) {
-	if !h.requirePasswordLoginEnabled(c) {
+	_ = h.oidc.WithStateLease(func(state oidcruntime.State) error {
+		h.loginWithState(c, state)
+		return nil
+	})
+}
+
+func (h *AuthHandler) loginWithState(c *gin.Context, state oidcruntime.State) {
+	if !passwordLoginEnabled(c, state) {
 		return
 	}
 	var req struct {
@@ -254,8 +269,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	})
 }
 
-func (h *AuthHandler) requirePasswordLoginEnabled(c *gin.Context) bool {
-	if !h.oidc.State().Config.DisablePasswordLogin {
+func passwordLoginEnabled(c *gin.Context, state oidcruntime.State) bool {
+	if !state.Config.DisablePasswordLogin {
 		return true
 	}
 	c.JSON(http.StatusForbidden, gin.H{
@@ -365,10 +380,11 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		return
 	}
 
+	state := h.oidc.State()
 	if hasUsers == 0 {
-		oidcConfig := h.oidc.State().Config
-		oidcStatus := h.oidcStatus()
-		bootstrapReady := h.oidcBootstrapReady()
+		oidcConfig := state.Config
+		oidcStatus := oidcStatus(state)
+		bootstrapReady := oidcBootstrapReady(state)
 		passwordLoginEnabled := !oidcConfig.DisablePasswordLogin
 		registrationMode := "closed"
 		if passwordLoginEnabled && !bootstrapReady {
@@ -381,13 +397,13 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		return
 	}
 
-	oidcConfig := h.oidc.State().Config
+	oidcConfig := state.Config
 	user := middleware.GetCurrentUser(c)
 	if c.GetHeader("Authorization") != "" && user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-	oidcStatus := h.oidcStatus()
+	oidcStatus := oidcStatus(state)
 	if user != nil && oidcConfig.Enabled {
 		if linked, err := store.HasOIDCIdentityForUser(c.Request.Context(), user.ID, oidcConfig.IssuerURL); err == nil {
 			oidcStatus["linked"] = linked

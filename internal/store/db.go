@@ -169,6 +169,7 @@ func createTables() error {
 			"authMethod"        TEXT NOT NULL DEFAULT 'password',
 			"authenticatedAt"   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			"absoluteExpiresAt" DATETIME,
+			"cookieSecure"      BOOLEAN CHECK ("cookieSecure" IN (0, 1)),
 			"createdAt"         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			CONSTRAINT "UserSession_userId_fkey" FOREIGN KEY ("userId")
 				REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE

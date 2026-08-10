@@ -68,11 +68,39 @@ func (h *GroupHandler) ScrapeMetadata(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"results": []service.ComicMetadata{}, "detectedContentType": ct})
 		return
 	}
-	results := service.SearchMetadataWithContext(c.Request.Context(), query, sources, body.Lang, ct)
+	options, err := groupMetadataSearchOptions(id, sources)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取合集标签失败"})
+		return
+	}
+	results := searchMetadataWithOptionsContext(c.Request.Context(), query, sources, body.Lang, options, ct)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}
 	c.JSON(http.StatusOK, gin.H{"results": results, "detectedContentType": ct})
+}
+
+func groupMetadataSearchOptions(groupID int, sources []string) (service.MetadataSearchOptions, error) {
+	if !includesMetadataSource(sources, "ehentai") {
+		return service.MetadataSearchOptions{}, nil
+	}
+	tags, err := store.GetGroupTags(groupID)
+	if err != nil {
+		return service.MetadataSearchOptions{}, err
+	}
+	return metadataSearchOptionsForTags(sources, tags), nil
+}
+
+func metadataSearchOptionsForTags(sources []string, tags []store.Tag) service.MetadataSearchOptions {
+	options := service.MetadataSearchOptions{}
+	if !includesMetadataSource(sources, "ehentai") {
+		return options
+	}
+	options.EHentaiExistingTags = make([]string, 0, len(tags))
+	for _, tag := range tags {
+		options.EHentaiExistingTags = append(options.EHentaiExistingTags, tag.Name)
+	}
+	return options
 }
 
 // POST /api/groups/:id/apply-metadata — 将刮削结果应用到系列元数据

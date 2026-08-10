@@ -232,7 +232,13 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 			results = append(results, result)
 			continue
 		}
-		metaResults := service.SearchMetadataWithContext(c.Request.Context(), group.Name, sources, body.Lang, groupCT)
+		options, optionsErr := groupMetadataSearchOptions(gid, sources)
+		if optionsErr != nil {
+			result.Error = "读取合集标签失败"
+			results = append(results, result)
+			continue
+		}
+		metaResults := searchMetadataWithOptionsContext(c.Request.Context(), group.Name, sources, body.Lang, options, groupCT)
 		if len(metaResults) == 0 {
 			result.Error = "未找到匹配的元数据"
 			results = append(results, result)

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -8,8 +9,152 @@ import (
 
 	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/model"
+	"github.com/nowen-reader/nowen-reader/internal/service"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
+
+func TestOwnerScrapePassesStoredTagsOnlyToEHOptions(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	originalConfig := config.GetSiteConfig()
+	enabled := true
+	siteConfig := originalConfig
+	siteConfig.ScraperEnabled = &enabled
+	if err := config.SaveSiteConfig(&siteConfig); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = config.SaveSiteConfig(&originalConfig) })
+
+	router := setupTestRouter(t)
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	cookie := registerAndLogin(t, router)
+	library := &model.Library{
+		ID:            "owner-search-library",
+		Name:          "Owner Search",
+		Type:          "comic",
+		RootPath:      t.TempDir(),
+		Enabled:       true,
+		DefaultAccess: "private",
+		ScanEnabled:   true,
+	}
+	if err := store.CreateLibrary(library); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+		INSERT INTO "Comic" ("id", "filename", "title", "type", "libraryId", "relativePath")
+		VALUES ('owner-search-comic', 'group.cbz', 'Group member', 'comic', ?, 'group.cbz');
+		INSERT INTO "ComicSeries" ("id", "libraryId", "rootRelativePath", "title", "sortTitle")
+		VALUES ('owner-search-series', ?, 'series', 'Series Search', 'series search');
+		INSERT INTO "ComicSeriesItem" ("seriesId", "comicId", "sortIndex")
+		VALUES ('owner-search-series', 'owner-search-comic', 0);
+	`, library.ID, library.ID); err != nil {
+		t.Fatal(err)
+	}
+	groupID, err := store.CreateGroupWithItems("Group Search", "", []string{"owner-search-comic"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupTags := []string{
+		"artist:group first",
+		"artist:group second",
+		"source:https://e-hentai.org/g/71/aaaaaaaaaa",
+	}
+	seriesTags := []string{
+		"artist:series first",
+		"female:series tag",
+		"source:https://exhentai.org/g/72/bbbbbbbbbb",
+	}
+	if err := store.SetGroupTags(int(groupID), groupTags); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSeriesTags("owner-search-series", seriesTags); err != nil {
+		t.Fatal(err)
+	}
+
+	type capturedSearch struct {
+		query   string
+		sources []string
+		tags    []string
+	}
+	var captured []capturedSearch
+	originalSearch := searchMetadataWithOptionsContext
+	searchMetadataWithOptionsContext = func(_ context.Context, query string, sources []string, _ string, options service.MetadataSearchOptions, _ ...string) []service.ComicMetadata {
+		captured = append(captured, capturedSearch{
+			query:   query,
+			sources: append([]string(nil), sources...),
+			tags:    append([]string(nil), options.EHentaiExistingTags...),
+		})
+		return []service.ComicMetadata{{Title: "Fixture result", Source: config.EHentaiSitePublic}}
+	}
+	t.Cleanup(func() { searchMetadataWithOptionsContext = originalSearch })
+
+	groupResponse := performAuthedRequest(router, http.MethodPost, "/api/groups/"+strconv.FormatInt(groupID, 10)+"/scrape-metadata", map[string]interface{}{
+		"query":       "group-query",
+		"sources":     []string{"ehentai"},
+		"contentType": "comic",
+	}, cookie)
+	if groupResponse.Code != http.StatusOK {
+		t.Fatalf("group scrape status = %d, body = %s", groupResponse.Code, groupResponse.Body.String())
+	}
+	seriesResponse := performAuthedRequest(router, http.MethodPost, "/api/series/owner-search-series/scrape-metadata", map[string]interface{}{
+		"query":   "series-query",
+		"sources": []string{"ehentai"},
+	}, cookie)
+	if seriesResponse.Code != http.StatusOK {
+		t.Fatalf("series scrape status = %d, body = %s", seriesResponse.Code, seriesResponse.Body.String())
+	}
+	batchResponse := performAuthedRequest(router, http.MethodPost, "/api/groups/batch-scrape", map[string]interface{}{
+		"groupIds":    []int{int(groupID)},
+		"sources":     []string{"ehentai"},
+		"contentType": "comic",
+		"dryRun":      true,
+	}, cookie)
+	if batchResponse.Code != http.StatusOK {
+		t.Fatalf("batch group scrape status = %d, body = %s", batchResponse.Code, batchResponse.Body.String())
+	}
+	nonEHResponse := performAuthedRequest(router, http.MethodPost, "/api/groups/"+strconv.FormatInt(groupID, 10)+"/scrape-metadata", map[string]interface{}{
+		"query":       "group-non-eh-query",
+		"sources":     []string{"bangumi"},
+		"contentType": "comic",
+	}, cookie)
+	if nonEHResponse.Code != http.StatusOK {
+		t.Fatalf("non-EH group scrape status = %d, body = %s", nonEHResponse.Code, nonEHResponse.Body.String())
+	}
+
+	if len(captured) != 4 {
+		t.Fatalf("captured searches = %#v, want 4", captured)
+	}
+	if captured[0].query != "group-query" || captured[1].query != "series-query" || captured[2].query != "Group Search" || captured[3].query != "group-non-eh-query" {
+		t.Fatalf("captured query order = %#v", captured)
+	}
+	assertStringsExactly(t, groupTags, captured[0].tags)
+	assertStringsExactly(t, seriesTags, captured[1].tags)
+	assertStringsExactly(t, groupTags, captured[2].tags)
+	if includesMetadataSource(captured[3].sources, "ehentai") || len(captured[3].tags) != 0 {
+		t.Fatalf("non-EH search received EH tag context: %#v", captured[3])
+	}
+}
+
+func assertStringsExactly(t *testing.T, want, got []string) {
+	t.Helper()
+	wantSet := make(map[string]bool, len(want))
+	for _, value := range want {
+		wantSet[value] = true
+	}
+	gotSet := make(map[string]bool, len(got))
+	for _, value := range got {
+		gotSet[value] = true
+	}
+	if len(wantSet) != len(gotSet) {
+		t.Fatalf("strings = %#v, want %#v", gotSet, wantSet)
+	}
+	for value := range wantSet {
+		if !gotSet[value] {
+			t.Fatalf("strings missing %q: %#v", value, gotSet)
+		}
+	}
+}
 
 func TestGroupScrapeDoesNotSyncIntoDirectorySeries(t *testing.T) {
 	t.Setenv("DATA_DIR", t.TempDir())

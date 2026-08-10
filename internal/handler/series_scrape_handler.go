@@ -53,7 +53,8 @@ func (h *SeriesHandler) ScrapeMetadata(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"results": []service.ComicMetadata{}, "detectedContentType": body.ContentType})
 		return
 	}
-	results := service.SearchMetadataWithContext(c.Request.Context(), body.Query, body.Sources, body.Lang, body.ContentType)
+	options := metadataSearchOptionsForTags(body.Sources, detail.Series.Tags)
+	results := searchMetadataWithOptionsContext(c.Request.Context(), body.Query, body.Sources, body.Lang, options, body.ContentType)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}

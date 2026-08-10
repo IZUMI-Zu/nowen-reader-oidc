@@ -15,6 +15,10 @@ type MetadataHandler struct{}
 
 func NewMetadataHandler() *MetadataHandler { return &MetadataHandler{} }
 
+// searchMetadataWithOptionsContext is a narrow test seam shared by metadata
+// owner handlers. Production always points at the service implementation.
+var searchMetadataWithOptionsContext = service.SearchMetadataWithOptionsContext
+
 // POST /api/metadata/search
 // Also handles GET /api/metadata/search?q=...&sources=...&lang=...
 func (h *MetadataHandler) Search(c *gin.Context) {
@@ -73,7 +77,7 @@ func (h *MetadataHandler) Search(c *gin.Context) {
 		}
 	}
 
-	results := service.SearchMetadataWithOptionsContext(c.Request.Context(), query, sources, lang, options, contentType)
+	results := searchMetadataWithOptionsContext(c.Request.Context(), query, sources, lang, options, contentType)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}

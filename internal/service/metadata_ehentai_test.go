@@ -110,8 +110,20 @@ func TestEHentaiBuildSearchURL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := u.Query().Get("f_search"), `"Archive title" artist:fixture artist language:english`; got != want {
+		if got, want := u.Query().Get("f_search"), `"Archive title" artist:"fixture artist"$ language:english`; got != want {
 			t.Fatalf("f_search = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("unsafe artist hint is ignored", func(t *testing.T) {
+		for _, artist := range []string{`fixture" uploader:someone`, "fixture*", "fixture%", "fixture$"} {
+			u, err := provider.buildSearchURLWithArtist("Archive title", artist)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := u.Query().Get("f_search"), `"Archive title" language:english`; got != want {
+				t.Fatalf("artist %q produced f_search = %q, want %q", artist, got, want)
+			}
 		}
 	})
 

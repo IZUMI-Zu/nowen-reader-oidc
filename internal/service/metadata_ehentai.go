@@ -322,8 +322,8 @@ func (p *ehentaiProvider) buildSearchURLWithArtist(query, artist string) (*url.U
 			return nil, errEHInvalidQuery
 		}
 		searchTerm = `"` + query + `"`
-		if artist = normalizeEHSearchTagValue(artist, 100); artist != "" {
-			searchTerm += " artist:" + artist
+		if artistTerm := exactEHArtistSearchTerm(artist); artistTerm != "" {
+			searchTerm += " " + artistTerm
 		}
 		if language := normalizeEHSearchTagValue(p.cfg.ForcedLanguage, 32); language != "" {
 			searchTerm += " language:" + language
@@ -401,6 +401,17 @@ func normalizeEHSearchTagValue(value string, maxBytes int) string {
 		}
 	}
 	return value
+}
+
+func exactEHArtistSearchTerm(value string) string {
+	value = normalizeEHSearchTagValue(value, 100)
+	if value == "" || strings.ContainsAny(value, "*$%") {
+		return ""
+	}
+	// EH treats whitespace-separated input as separate search terms. Keep the
+	// namespace outside the quoted value and append the exact-tag operator so a
+	// stored multi-word artist remains one constrained artist tag search.
+	return `artist:"` + value + `"$`
 }
 
 func (p *ehentaiProvider) fetchGalleryMetadata(ctx context.Context, refs []ehGalleryRef) ([]ComicMetadata, error) {

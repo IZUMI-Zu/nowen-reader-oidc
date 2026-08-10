@@ -462,59 +462,28 @@ func GetAllTags() ([]TagWithCount, error) {
 	return tags, nil
 }
 
-// GetTagsForLibraries returns only tags attached to owners visible through the
-// supplied libraries. Counts include accessible comics, groups containing an
-// accessible comic or directory series, and accessible directory series.
+// GetComicTagsForLibraries returns the tags usable by the comic-list filter in
+// the supplied libraries. Parent-only group and directory-series tags are
+// intentionally excluded because the comic query filters through ComicTag.
 // An empty library list deliberately returns no tags.
-func GetTagsForLibraries(libraryIDs []string) ([]TagWithCount, error) {
+func GetComicTagsForLibraries(libraryIDs []string) ([]TagWithCount, error) {
 	libraryIDs = uniqueNonEmptyStrings(libraryIDs)
 	if len(libraryIDs) == 0 {
 		return []TagWithCount{}, nil
 	}
 
 	marks := placeholders(len(libraryIDs))
-	args := make([]any, 0, len(libraryIDs)*4)
-	for range 4 {
-		for _, libraryID := range libraryIDs {
-			args = append(args, libraryID)
-		}
+	args := make([]any, 0, len(libraryIDs))
+	for _, libraryID := range libraryIDs {
+		args = append(args, libraryID)
 	}
 
 	rows, err := db.Query(`
-		WITH accessible_usage("tagId") AS (
-			SELECT ct."tagId"
-			FROM "ComicTag" ct
-			JOIN "Comic" c ON c."id" = ct."comicId"
-			WHERE c."libraryId" IN (`+marks+`)
-
-			UNION ALL
-
-			SELECT cgt."tagId"
-			FROM "ComicGroupTag" cgt
-			WHERE EXISTS (
-				SELECT 1
-				FROM "ComicGroupItem" cgi
-				JOIN "Comic" c ON c."id" = cgi."comicId"
-				WHERE cgi."groupId" = cgt."groupId"
-				  AND c."libraryId" IN (`+marks+`)
-			) OR EXISTS (
-				SELECT 1
-				FROM "ComicGroupSeries" cgs
-				JOIN "ComicSeries" cs ON cs."id" = cgs."seriesId"
-				WHERE cgs."groupId" = cgt."groupId"
-				  AND cs."libraryId" IN (`+marks+`)
-			)
-
-			UNION ALL
-
-			SELECT cst."tagId"
-			FROM "ComicSeriesTag" cst
-			JOIN "ComicSeries" cs ON cs."id" = cst."seriesId"
-			WHERE cs."libraryId" IN (`+marks+`)
-		)
 		SELECT t."id", t."name", t."color", COUNT(*) AS cnt
 		FROM "Tag" t
-		JOIN accessible_usage au ON au."tagId" = t."id"
+		JOIN "ComicTag" ct ON ct."tagId" = t."id"
+		JOIN "Comic" c ON c."id" = ct."comicId"
+		WHERE c."libraryId" IN (`+marks+`)
 		GROUP BY t."id", t."name", t."color"
 		ORDER BY t."name" ASC
 	`, args...)

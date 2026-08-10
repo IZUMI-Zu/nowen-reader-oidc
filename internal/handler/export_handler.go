@@ -208,12 +208,12 @@ func collectExportData(userID string, isAdmin bool) (map[string]interface{}, err
 		data["readingStats"] = stats
 	}
 
-	// 标签：管理员导出全局视图；普通用户只导出可访问书库的标签。
+	// 标签：管理员导出全局视图；普通用户只导出随可访问漫画导出的标签。
 	var tags []store.TagWithCount
 	if isAdmin {
 		tags, err = store.GetAllTags()
 	} else {
-		tags, err = store.GetTagsForLibraries(libraryIDs)
+		tags, err = store.GetComicTagsForLibraries(libraryIDs)
 	}
 	if err == nil {
 		data["tags"] = tags

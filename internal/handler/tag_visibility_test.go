@@ -114,10 +114,8 @@ func TestTagEndpointsRespectLibraryVisibility(t *testing.T) {
 	}
 
 	wantReaderTags := map[string]int{
-		visibleComicTag:  1,
-		visibleGroupTag:  1,
-		visibleSeriesTag: 1,
-		sharedTag:        1,
+		visibleComicTag: 1,
+		sharedTag:       1,
 	}
 	readerTagsResponse := performAuthedRequest(router, http.MethodGet, "/api/tags", nil, readerToken)
 	if readerTagsResponse.Code != http.StatusOK {

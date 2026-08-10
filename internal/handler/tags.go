@@ -17,8 +17,8 @@ func NewTagHandler() *TagHandler {
 }
 
 // GET /api/tags — List tags visible to the current user. Administrators retain
-// the global view used by Tag Manager; readers only see tags attached to
-// content in libraries they can access.
+// the global view used by Tag Manager; readers only see ComicTag entries usable
+// by the comic-list filter in libraries they can access.
 func (h *TagHandler) ListTags(c *gin.Context) {
 	user := middleware.GetCurrentUser(c)
 	if user == nil {
@@ -36,7 +36,7 @@ func (h *TagHandler) ListTags(c *gin.Context) {
 		var libraryIDs []string
 		libraryIDs, err = store.GetUserAccessibleLibraryIDs(user.ID)
 		if err == nil {
-			tags, err = store.GetTagsForLibraries(libraryIDs)
+			tags, err = store.GetComicTagsForLibraries(libraryIDs)
 		}
 	}
 	if err != nil {

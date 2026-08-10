@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,8 @@ import (
 )
 
 const maxCoverDownloadBytes = 20 << 20
+
+var errEHCoverRequest = errors.New("E-Hentai cover request failed")
 
 // 合集封面下载去重：同一 groupID 同时只有一个下载任务，其余等待结果
 var groupCoverDownload sync.Map  // groupID -> chan struct{}
@@ -178,6 +181,9 @@ func cacheCoverAsThumbnailForSource(comicID, coverURL, metadataSource string) er
 	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		if err != nil {
+			if isEHMetadataSource(metadataSource) {
+				return errEHCoverRequest
+			}
 			return err
 		}
 		return fmt.Errorf("download cover returned HTTP %d", resp.StatusCode)

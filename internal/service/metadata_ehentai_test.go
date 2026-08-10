@@ -1,11 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -509,6 +511,46 @@ func TestEHentaiCoverRedirectPolicyRejectsLeavingOfficialImageHosts(t *testing.T
 	}
 	if got := metadataCoverPolicySource("", "https://ul.ehgt.org/g/persisted.jpg"); got != config.EHentaiSitePublic {
 		t.Fatalf("persisted EH cover did not restore strict redirect policy: %q", got)
+	}
+}
+
+func TestEHentaiCoverDownloadLogRedactsTransportURLs(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = ehRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &url.Error{
+			Op:  "Get",
+			URL: "https://redirect.example/private-token",
+			Err: errors.New("dial included remote details"),
+		}
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	var output bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&output)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+
+	downloadCoverAsThumbnail("eh-log-redaction", "https://ul.ehgt.org/secret-cover.jpg")
+	logged := output.String()
+	if !strings.Contains(logged, errEHCoverRequest.Error()) {
+		t.Fatalf("sanitized cover error missing from log: %q", logged)
+	}
+	for _, secret := range []string{"secret-cover.jpg", "redirect.example", "private-token", "dial included remote details"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("cover log leaked %q: %q", secret, logged)
+		}
+	}
+
+	otherErr := cacheCoverAsThumbnailForSource("other-provider", "https://example.com/cover.jpg", "googlebooks")
+	if otherErr == nil || !strings.Contains(otherErr.Error(), "dial included remote details") {
+		t.Fatalf("non-EH transport error was unexpectedly changed: %v", otherErr)
 	}
 }
 

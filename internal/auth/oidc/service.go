@@ -36,6 +36,7 @@ const (
 type BeginRequest struct {
 	Purpose       Purpose
 	SessionUserID string
+	SessionID     string
 	ReturnTo      string
 }
 
@@ -64,6 +65,7 @@ type LoginTransaction struct {
 	PKCEVerifier      string
 	Purpose           Purpose
 	SessionUserID     string
+	SessionID         string
 	ReturnTo          string
 	ExpiresAt         time.Time
 	CreatedAt         time.Time
@@ -86,6 +88,7 @@ type AuthenticatedIdentity struct {
 	VerifiedIdentity
 	Purpose           Purpose
 	SessionUserID     string
+	SessionID         string
 	ReturnTo          string
 	ConfigRevision    int64
 	ConfigFingerprint string
@@ -151,7 +154,8 @@ func NewService(provider Provider, transactions TransactionStore, options Option
 }
 
 func (s *Service) Begin(ctx context.Context, request BeginRequest) (AuthorizationRedirect, error) {
-	if !validPurpose(request.Purpose) || (request.Purpose == PurposeLogin) != (request.SessionUserID == "") {
+	if !validPurpose(request.Purpose) || (request.Purpose == PurposeLogin) != (request.SessionUserID == "") ||
+		(request.Purpose == PurposeConfigTest) != (request.SessionID != "") {
 		return AuthorizationRedirect{}, fmt.Errorf("%w: unsupported purpose", ErrInvalidTransaction)
 	}
 	returnTo, err := validateReturnTo(request.ReturnTo, s.basePath)
@@ -185,6 +189,7 @@ func (s *Service) Begin(ctx context.Context, request BeginRequest) (Authorizatio
 		PKCEVerifier:      verifier,
 		Purpose:           request.Purpose,
 		SessionUserID:     request.SessionUserID,
+		SessionID:         request.SessionID,
 		ReturnTo:          returnTo,
 		CreatedAt:         now,
 		ExpiresAt:         now.Add(s.ttl),
@@ -209,7 +214,7 @@ func (s *Service) Complete(ctx context.Context, request CallbackRequest) (Authen
 		return AuthenticatedIdentity{}, fmt.Errorf("consume OIDC transaction: %w", err)
 	}
 	result := AuthenticatedIdentity{
-		Purpose: transaction.Purpose, SessionUserID: transaction.SessionUserID, ReturnTo: transaction.ReturnTo,
+		Purpose: transaction.Purpose, SessionUserID: transaction.SessionUserID, SessionID: transaction.SessionID, ReturnTo: transaction.ReturnTo,
 		ConfigRevision: transaction.ConfigRevision, ConfigFingerprint: transaction.ConfigFingerprint,
 	}
 	if !constantTimeEqual(transaction.ConfigFingerprint, s.configFingerprint) {

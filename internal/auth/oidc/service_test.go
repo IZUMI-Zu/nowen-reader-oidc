@@ -126,6 +126,8 @@ func TestBeginRequiresSessionUserOnlyForAccountBoundPurposes(t *testing.T) {
 		{Purpose: oidcauth.PurposeLink, ReturnTo: "/reader/"},
 		{Purpose: oidcauth.PurposeReauth, ReturnTo: "/reader/"},
 		{Purpose: oidcauth.PurposeConfigTest, ReturnTo: "/reader/"},
+		{Purpose: oidcauth.PurposeConfigTest, SessionUserID: "user-1", ReturnTo: "/reader/"},
+		{Purpose: oidcauth.PurposeReauth, SessionUserID: "user-1", SessionID: "unexpected", ReturnTo: "/reader/"},
 	} {
 		if _, err := service.Begin(context.Background(), request); !errors.Is(err, oidcauth.ErrInvalidTransaction) {
 			t.Fatalf("Begin(%+v) error = %v, want ErrInvalidTransaction", request, err)
@@ -154,7 +156,7 @@ func TestInteractivePurposesRequireFreshProviderAuthenticationTime(t *testing.T)
 						BasePath: "/reader", TransactionTTL: 5 * time.Minute, Now: func() time.Time { return now },
 					})
 					begin, err := service.Begin(context.Background(), oidcauth.BeginRequest{
-						Purpose: purpose, SessionUserID: "user-1", ReturnTo: "/reader/settings",
+						Purpose: purpose, SessionUserID: "user-1", SessionID: sessionIDForPurpose(purpose), ReturnTo: "/reader/settings",
 					})
 					if err != nil {
 						t.Fatalf("Begin() error = %v", err)
@@ -178,6 +180,13 @@ func TestInteractivePurposesRequireFreshProviderAuthenticationTime(t *testing.T)
 			}
 		})
 	}
+}
+
+func sessionIDForPurpose(purpose oidcauth.Purpose) string {
+	if purpose == oidcauth.PurposeConfigTest {
+		return "admin-session"
+	}
+	return ""
 }
 
 func TestCompleteVerifiesBindingNonceAndConsumesTransactionOnce(t *testing.T) {

@@ -77,9 +77,12 @@ func (r *fakeHandlerOIDCRuntime) CompleteAndFinalize(ctx context.Context, reques
 	return identity, nil
 }
 
-func (r *fakeHandlerOIDCRuntime) CompleteConfigTest(_ context.Context, actorUserID, _ string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error) {
+func (r *fakeHandlerOIDCRuntime) CompleteConfigTest(_ context.Context, actorUserID, actorSessionID, _ string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error) {
 	r.verifiedUser = actorUserID
 	r.verifiedIdentity = identity
+	if identity.SessionID != actorSessionID {
+		return oidcruntime.AdminConfig{}, oidcauth.ErrInvalidTransaction
+	}
 	return oidcruntime.AdminConfig{Status: "ready"}, nil
 }
 
@@ -259,7 +262,7 @@ func TestOIDCConfigurationTestDelegatesVerifiedIdentityForCurrentAdministrator(t
 			VerifiedIdentity: oidcauth.VerifiedIdentity{
 				Issuer: cfg.IssuerURL, Subject: "admin-oidc-subject", Nonce: "verified",
 			},
-			Purpose: oidcauth.PurposeConfigTest, SessionUserID: "local-admin", ReturnTo: "/reader/settings?tab=authentication",
+			Purpose: oidcauth.PurposeConfigTest, SessionUserID: "local-admin", SessionID: "admin-config-session", ReturnTo: "/reader/settings?tab=authentication",
 		}},
 		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true},
 	}
@@ -278,6 +281,48 @@ func TestOIDCConfigurationTestDelegatesVerifiedIdentityForCurrentAdministrator(t
 	}
 	if runtime.verifiedIdentity.Subject != "admin-oidc-subject" || runtime.verifiedIdentity.Purpose != oidcauth.PurposeConfigTest {
 		t.Fatalf("verified identity = %+v", runtime.verifiedIdentity)
+	}
+}
+
+func TestOIDCConfigurationTestRejectsAnotherSessionForTheSameAdministrator(t *testing.T) {
+	t.Setenv("BASE_PATH", "/reader")
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-config-session.db")); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	t.Cleanup(store.CloseDB)
+	createLocalAdminForOIDCTest(t)
+	for _, sessionID := range []string{"initiating-session", "alternate-session"} {
+		if err := store.CreateSession(&model.UserSession{
+			ID: sessionID, UserID: "local-admin", ExpiresAt: time.Now().Add(time.Hour),
+			AuthMethod: model.SessionAuthMethodPassword, AuthenticatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("CreateSession(%q) error = %v", sessionID, err)
+		}
+	}
+	cfg := enabledOIDCHandlerConfig()
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+			VerifiedIdentity: oidcauth.VerifiedIdentity{Issuer: cfg.IssuerURL, Subject: "admin-oidc-subject"},
+			Purpose:          oidcauth.PurposeConfigTest, SessionUserID: "local-admin", SessionID: "initiating-session",
+			ReturnTo: "/reader/settings?tab=authentication",
+		}},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "alternate-session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?oidc_error=session_mismatch&tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if runtime.verifiedUser != "" || len(runtime.failureAudits) != 1 || !strings.HasSuffix(runtime.failureAudits[0], "|session_mismatch") {
+		t.Fatalf("configuration test was committed or not audited: user=%q audits=%#v", runtime.verifiedUser, runtime.failureAudits)
 	}
 }
 
@@ -313,7 +358,7 @@ func TestOIDCConfigurationTestAuditsSessionMismatchBeforeVerificationCommit(t *t
 	runtime := &fakeHandlerOIDCRuntime{
 		fakeOIDCService: &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
 			VerifiedIdentity: oidcauth.VerifiedIdentity{Issuer: cfg.IssuerURL, Subject: "subject"},
-			Purpose:          oidcauth.PurposeConfigTest, SessionUserID: "local-admin", ReturnTo: "/reader/settings?tab=authentication",
+			Purpose:          oidcauth.PurposeConfigTest, SessionUserID: "local-admin", SessionID: "missing-session", ReturnTo: "/reader/settings?tab=authentication",
 		}},
 		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true, Ready: true},
 	}

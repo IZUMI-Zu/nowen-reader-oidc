@@ -170,7 +170,7 @@ func (m *Manager) Begin(ctx context.Context, request oidcauth.BeginRequest) (oid
 	return result, err
 }
 
-func (m *Manager) BeginConfigTest(ctx context.Context, actorUserID, returnTo string) (oidcauth.AuthorizationRedirect, error) {
+func (m *Manager) BeginConfigTest(ctx context.Context, actorUserID, actorSessionID, returnTo string) (oidcauth.AuthorizationRedirect, error) {
 	m.updateMu.RLock()
 	defer m.updateMu.RUnlock()
 	if m.source != ConfigSourceDatabase {
@@ -181,7 +181,7 @@ func (m *Manager) BeginConfigTest(ctx context.Context, actorUserID, returnTo str
 		return oidcauth.AuthorizationRedirect{}, ErrConfigurationInvalid
 	}
 	result, err := snapshot.service.Begin(ctx, oidcauth.BeginRequest{
-		Purpose: oidcauth.PurposeConfigTest, SessionUserID: actorUserID, ReturnTo: returnTo,
+		Purpose: oidcauth.PurposeConfigTest, SessionUserID: actorUserID, SessionID: actorSessionID, ReturnTo: returnTo,
 	})
 	result.CookieSecure = snapshot.state.Config.SecureCookies
 	return result, err
@@ -403,7 +403,7 @@ func (m *Manager) Apply(ctx context.Context, request UpdateRequest) (result Admi
 	return result, nil
 }
 
-func (m *Manager) CompleteConfigTest(ctx context.Context, actorUserID, requestID string, identity oidcauth.AuthenticatedIdentity) (result AdminConfig, resultErr error) {
+func (m *Manager) CompleteConfigTest(ctx context.Context, actorUserID, actorSessionID, requestID string, identity oidcauth.AuthenticatedIdentity) (result AdminConfig, resultErr error) {
 	auditRevision := identity.ConfigRevision
 	if auditRevision < 0 {
 		auditRevision = 0
@@ -418,7 +418,7 @@ func (m *Manager) CompleteConfigTest(ctx context.Context, actorUserID, requestID
 	if m.source != ConfigSourceDatabase {
 		return AdminConfig{}, ErrEnvironmentManaged
 	}
-	if identity.Purpose != oidcauth.PurposeConfigTest || identity.SessionUserID != actorUserID ||
+	if identity.Purpose != oidcauth.PurposeConfigTest || identity.SessionUserID != actorUserID || identity.SessionID != actorSessionID ||
 		identity.ConfigRevision <= 0 || identity.ConfigFingerprint == "" {
 		return AdminConfig{}, oidcauth.ErrInvalidTransaction
 	}

@@ -84,7 +84,7 @@ func (r *staticOIDCRuntime) Cancel(ctx context.Context, request oidcauth.CancelR
 	return r.service.Cancel(ctx, request)
 }
 
-func (r *staticOIDCRuntime) CompleteConfigTest(context.Context, string, string, oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error) {
+func (r *staticOIDCRuntime) CompleteConfigTest(context.Context, string, string, string, oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error) {
 	return oidcruntime.AdminConfig{}, oidcruntime.ErrEnvironmentManaged
 }
 
@@ -244,13 +244,13 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 		return
 	}
 	if identity.Purpose == oidcauth.PurposeConfigTest {
-		user, _, ok := currentTransactionSession(c, identity.SessionUserID)
+		user, credential, ok := currentTransactionSession(c, identity.SessionUserID, identity.SessionID)
 		if !ok || user.Role != "admin" {
 			h.recordOIDCConfigTestFailure(c, identity.SessionUserID, "session_mismatch")
 			redirectOIDCFailure(c, identity.ReturnTo, "session_mismatch")
 			return
 		}
-		if _, err := h.oidc.CompleteConfigTest(c.Request.Context(), user.ID, oidcAuditRequestID(c), identity); err != nil {
+		if _, err := h.oidc.CompleteConfigTest(c.Request.Context(), user.ID, credential.ID, oidcAuditRequestID(c), identity); err != nil {
 			if errors.Is(err, oidcauth.ErrConfigurationChanged) || errors.Is(err, oidcruntime.ErrConfigConflict) {
 				redirectOIDCFailure(c, identity.ReturnTo, "oidc_configuration_changed")
 				return
@@ -313,7 +313,7 @@ func (h *AuthHandler) finalizeOIDCCallback(c *gin.Context, state oidcruntime.Sta
 			return "login_failed"
 		}
 	case oidcauth.PurposeLink:
-		user, _, ok := currentTransactionSession(c, identity.SessionUserID)
+		user, _, ok := currentTransactionSession(c, identity.SessionUserID, "")
 		if !ok {
 			return "session_mismatch"
 		}
@@ -324,7 +324,7 @@ func (h *AuthHandler) finalizeOIDCCallback(c *gin.Context, state oidcruntime.Sta
 			return "link_failed"
 		}
 	case oidcauth.PurposeReauth:
-		user, credential, ok := currentTransactionSession(c, identity.SessionUserID)
+		user, credential, ok := currentTransactionSession(c, identity.SessionUserID, "")
 		if !ok {
 			return "session_mismatch"
 		}
@@ -372,10 +372,11 @@ func (h *AuthHandler) OIDCUnlink(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func currentTransactionSession(c *gin.Context, expectedUserID string) (*model.AuthUser, *middleware.RequestCredential, bool) {
+func currentTransactionSession(c *gin.Context, expectedUserID, expectedSessionID string) (*model.AuthUser, *middleware.RequestCredential, bool) {
 	user := middleware.GetCurrentUser(c)
 	credential := middleware.GetCurrentCredential(c)
-	return user, credential, user != nil && user.ID == expectedUserID && credential != nil && credential.Type == middleware.CredentialSession
+	return user, credential, user != nil && user.ID == expectedUserID && credential != nil && credential.Type == middleware.CredentialSession &&
+		(expectedSessionID == "" || credential.ID == expectedSessionID)
 }
 
 func redirectOIDCFailure(c *gin.Context, returnTo, code string) {

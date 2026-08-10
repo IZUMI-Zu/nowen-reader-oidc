@@ -36,7 +36,7 @@ type oidcRuntime interface {
 	State() oidcruntime.State
 	WithStateLease(run oidcruntime.StateLease) error
 	CompleteAndFinalize(ctx context.Context, request oidcauth.CallbackRequest, finalize oidcruntime.CompletionFinalizer) (oidcauth.AuthenticatedIdentity, error)
-	CompleteConfigTest(ctx context.Context, actorUserID, requestID string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error)
+	CompleteConfigTest(ctx context.Context, actorUserID, actorSessionID, requestID string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error)
 	RecordAdminFailure(ctx context.Context, actorUserID, action, requestID, code string) error
 }
 

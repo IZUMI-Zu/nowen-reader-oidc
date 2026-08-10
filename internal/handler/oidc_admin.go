@@ -138,8 +138,13 @@ func (h *OIDCAdminHandler) BeginTestLogin(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Administrator access required"})
 		return
 	}
+	credential := middleware.GetCurrentCredential(c)
+	if credential == nil || credential.Type != middleware.CredentialSession {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Browser session required"})
+		return
+	}
 	returnTo := config.JoinBasePath("/settings?tab=authentication")
-	result, err := h.runtime.BeginConfigTest(c.Request.Context(), user.ID, returnTo)
+	result, err := h.runtime.BeginConfigTest(c.Request.Context(), user.ID, credential.ID, returnTo)
 	if err != nil {
 		h.recordFailure(c, user.ID, "begin_verify", adminOIDCErrorCode(err))
 		if errors.Is(err, oidcauth.ErrProviderUnavailable) {

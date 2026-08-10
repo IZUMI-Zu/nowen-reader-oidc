@@ -202,6 +202,7 @@ func createTables() error {
 			"pkceVerifier"  TEXT NOT NULL,
 			"purpose"       TEXT NOT NULL,
 			"sessionUserId" TEXT NOT NULL DEFAULT '',
+			"sessionId"     TEXT NOT NULL DEFAULT '',
 			"returnTo"      TEXT NOT NULL,
 			"expiresAt"     DATETIME NOT NULL,
 			"consumedAt"    DATETIME,

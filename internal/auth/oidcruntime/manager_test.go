@@ -263,7 +263,7 @@ func TestManagerDraftTestVerifyActivateAndHotReload(t *testing.T) {
 		t.Fatalf("provider probes = %+v", provider)
 	}
 
-	begin, err := manager.BeginConfigTest(context.Background(), "admin", "/reader/settings?tab=authentication")
+	begin, err := manager.BeginConfigTest(context.Background(), "admin", "admin-session", "/reader/settings?tab=authentication")
 	if err != nil {
 		t.Fatalf("BeginConfigTest() error = %v", err)
 	}
@@ -274,12 +274,18 @@ func TestManagerDraftTestVerifyActivateAndHotReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete(config test) error = %v", err)
 	}
-	if identity.Purpose != oidcauth.PurposeConfigTest || identity.SessionUserID != "admin" || identity.Subject != "admin-subject" {
+	if identity.Purpose != oidcauth.PurposeConfigTest || identity.SessionUserID != "admin" || identity.SessionID != "admin-session" || identity.Subject != "admin-subject" {
 		t.Fatalf("test identity = %+v", identity)
 	}
 
 	repository.actorHasPassword = true
-	verified, err := manager.CompleteConfigTest(context.Background(), "admin", "request-verify", identity)
+	if _, err := manager.CompleteConfigTest(context.Background(), "admin", "other-session", "request-wrong-session", identity); !errors.Is(err, oidcauth.ErrInvalidTransaction) {
+		t.Fatalf("CompleteConfigTest(wrong session) error = %v, want ErrInvalidTransaction", err)
+	}
+	if repository.adminLinked {
+		t.Fatal("wrong administrator session verified or bound the configuration")
+	}
+	verified, err := manager.CompleteConfigTest(context.Background(), "admin", "admin-session", "request-verify", identity)
 	if err != nil {
 		t.Fatalf("CompleteConfigTest() error = %v", err)
 	}
@@ -368,7 +374,7 @@ func TestCompleteConfigTestCannotVerifyOrBindAChangedProtocolConfig(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	begin, err := manager.BeginConfigTest(context.Background(), "admin", "/reader/settings?tab=authentication")
+	begin, err := manager.BeginConfigTest(context.Background(), "admin", "admin-session", "/reader/settings?tab=authentication")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +389,7 @@ func TestCompleteConfigTestCannotVerifyOrBindAChangedProtocolConfig(t *testing.T
 	if _, err := manager.Apply(context.Background(), UpdateRequest{ExpectedRevision: 1, ActorUserID: "admin", Fields: fields}); err != nil {
 		t.Fatalf("save replacement draft: %v", err)
 	}
-	if _, err := manager.CompleteConfigTest(context.Background(), "admin", "request", identity); !errors.Is(err, oidcauth.ErrConfigurationChanged) {
+	if _, err := manager.CompleteConfigTest(context.Background(), "admin", "admin-session", "request", identity); !errors.Is(err, oidcauth.ErrConfigurationChanged) {
 		t.Fatalf("stale config test error = %v", err)
 	}
 	record, err := repository.Load(context.Background())
@@ -421,7 +427,7 @@ func TestIncompleteReplacementDraftStillRejectsOldTransactionAsConfigurationChan
 	}); err != nil {
 		t.Fatal(err)
 	}
-	begin, err := manager.BeginConfigTest(context.Background(), "admin", "/reader/settings")
+	begin, err := manager.BeginConfigTest(context.Background(), "admin", "admin-session", "/reader/settings")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +552,7 @@ func TestDatabaseApplyWaitsForCallbackFinalizationAndPublishesOneSnapshot(t *tes
 	}); !errors.Is(err, oidcauth.ErrConfigurationChanged) {
 		t.Fatalf("stale transaction error = %v, want ErrConfigurationChanged", err)
 	}
-	newBegin, err := manager.BeginConfigTest(context.Background(), "admin", "/reader/settings")
+	newBegin, err := manager.BeginConfigTest(context.Background(), "admin", "admin-session", "/reader/settings")
 	if err != nil {
 		t.Fatal(err)
 	}

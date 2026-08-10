@@ -29,10 +29,10 @@ type OIDCTransactionStore struct{}
 
 func (OIDCTransactionStore) Create(ctx context.Context, transaction oidcauth.LoginTransaction) error {
 	_, err := db.ExecContext(ctx, `INSERT INTO "OIDCLoginTransaction"
-		("stateHash", "bindingHash", "nonce", "pkceVerifier", "purpose", "sessionUserId", "returnTo", "expiresAt", "createdAt", "configRevision", "configFingerprint")
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		("stateHash", "bindingHash", "nonce", "pkceVerifier", "purpose", "sessionUserId", "sessionId", "returnTo", "expiresAt", "createdAt", "configRevision", "configFingerprint")
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		transaction.StateHash, transaction.BindingHash, transaction.Nonce, transaction.PKCEVerifier,
-		string(transaction.Purpose), transaction.SessionUserID, transaction.ReturnTo, transaction.ExpiresAt, transaction.CreatedAt,
+		string(transaction.Purpose), transaction.SessionUserID, transaction.SessionID, transaction.ReturnTo, transaction.ExpiresAt, transaction.CreatedAt,
 		transaction.ConfigRevision, transaction.ConfigFingerprint,
 	)
 	return err
@@ -169,10 +169,10 @@ func (OIDCTransactionStore) Consume(ctx context.Context, stateHash, bindingHash 
 	var transaction oidcauth.LoginTransaction
 	var purpose string
 	err = tx.QueryRowContext(ctx, `SELECT "stateHash", "bindingHash", "nonce", "pkceVerifier", "purpose",
-		"sessionUserId", "returnTo", "expiresAt", "createdAt", "configRevision", "configFingerprint"
+		"sessionUserId", "sessionId", "returnTo", "expiresAt", "createdAt", "configRevision", "configFingerprint"
 		FROM "OIDCLoginTransaction" WHERE "stateHash" = ?`, stateHash).Scan(
 		&transaction.StateHash, &transaction.BindingHash, &transaction.Nonce, &transaction.PKCEVerifier, &purpose,
-		&transaction.SessionUserID, &transaction.ReturnTo, &transaction.ExpiresAt, &transaction.CreatedAt,
+		&transaction.SessionUserID, &transaction.SessionID, &transaction.ReturnTo, &transaction.ExpiresAt, &transaction.CreatedAt,
 		&transaction.ConfigRevision, &transaction.ConfigFingerprint,
 	)
 	if err != nil {

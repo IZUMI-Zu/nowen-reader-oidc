@@ -528,6 +528,7 @@ func (m *Manager) buildSnapshot(cfg config.OIDCConfig, record StoredConfig, conf
 	snapshot := &runtimeSnapshot{record: record, state: State{Config: cloneConfig(cfg), Source: m.source}}
 	if configErr != nil {
 		snapshot.state.ErrorCode = configErrorCode(configErr)
+		m.enablePasswordRecoveryForDatabaseError(snapshot)
 		m.attachChangedConfigurationRejector(snapshot, buildProvider)
 		return snapshot
 	}
@@ -542,6 +543,7 @@ func (m *Manager) buildSnapshot(cfg config.OIDCConfig, record StoredConfig, conf
 	if !buildProvider || fullErr != nil {
 		if cfg.Enabled && fullErr != nil {
 			snapshot.state.ErrorCode = configErrorCode(fullErr)
+			m.enablePasswordRecoveryForDatabaseError(snapshot)
 		}
 		m.attachChangedConfigurationRejector(snapshot, buildProvider)
 		return snapshot
@@ -549,12 +551,19 @@ func (m *Manager) buildSnapshot(cfg config.OIDCConfig, record StoredConfig, conf
 	service, err := m.buildService(cfg, record.Revision, snapshot.fingerprint)
 	if err != nil {
 		snapshot.state.ErrorCode = configErrorCode(err)
+		m.enablePasswordRecoveryForDatabaseError(snapshot)
 		return snapshot
 	}
 	snapshot.service = service
 	snapshot.state.Available = true
 	snapshot.state.Ready = cfg.Enabled
 	return snapshot
+}
+
+func (m *Manager) enablePasswordRecoveryForDatabaseError(snapshot *runtimeSnapshot) {
+	if m.source == ConfigSourceDatabase && snapshot != nil && snapshot.state.ErrorCode != "" {
+		snapshot.state.Config.DisablePasswordLogin = false
+	}
 }
 
 // A database draft can become incomplete while an older browser transaction

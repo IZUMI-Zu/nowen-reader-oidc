@@ -117,6 +117,79 @@ func (r *memoryConfigRepository) UserHasPassword(context.Context, string) (bool,
 	return r.actorHasPassword, nil
 }
 
+func TestInvalidDatabaseConfigurationReopensPasswordLoginOnStartup(t *testing.T) {
+	repository := newMemoryConfigRepository()
+	repository.record = StoredConfig{
+		Enabled: true, DisablePasswordLogin: true,
+		IssuerURL: "http://invalid.example.com", ClientID: "client", ProviderName: "Company Login",
+		Scopes: "openid", PublicURL: "https://reader.example.com", SessionTTLSeconds: 43200,
+	}
+	manager, err := NewManager(context.Background(), Options{
+		Source: ConfigSourceDatabase, Repository: repository, Transactions: &memoryTransactionStore{}, BasePath: "/reader",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := manager.State()
+	if state.Ready || state.ErrorCode == "" {
+		t.Fatalf("invalid database configuration was treated as ready: %+v", state)
+	}
+	if state.Config.DisablePasswordLogin {
+		t.Fatalf("invalid database configuration kept password login disabled: %+v", state)
+	}
+}
+
+func TestUnavailableDatabaseProviderReopensPasswordLoginOnStartup(t *testing.T) {
+	repository := newMemoryConfigRepository()
+	protector, err := NewAESGCMSecretProtector([]byte("0123456789abcdef0123456789abcdef"), SecretProtectionExternalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, keyID, err := protector.Encrypt([]byte("client-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.record = StoredConfig{
+		Enabled: true, DisablePasswordLogin: true,
+		IssuerURL: "https://identity.example.com", ClientID: "client", SecretCiphertext: ciphertext, SecretKeyID: keyID,
+		ProviderName: "Company Login", Scopes: "openid", PublicURL: "https://reader.example.com", SessionTTLSeconds: 43200,
+	}
+	manager, err := NewManager(context.Background(), Options{
+		Source: ConfigSourceDatabase, Repository: repository, Transactions: &memoryTransactionStore{}, Protector: protector, BasePath: "/reader",
+		ProviderFactory: func(oidcauth.RemoteProviderConfig) (probeProvider, error) {
+			return nil, oidcauth.ErrProviderUnavailable
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := manager.State()
+	if state.Ready || state.ErrorCode == "" {
+		t.Fatalf("unavailable database provider was treated as ready: %+v", state)
+	}
+	if state.Config.DisablePasswordLogin {
+		t.Fatalf("unavailable database provider kept password login disabled: %+v", state)
+	}
+}
+
+func TestInvalidEnvironmentConfigurationRemainsFailClosedOnStartup(t *testing.T) {
+	manager, err := NewManager(context.Background(), Options{
+		Source: ConfigSourceEnvironment,
+		EnvironmentConfig: config.OIDCConfig{
+			Enabled: true, DisablePasswordLogin: true,
+		},
+		EnvironmentError: errors.New("invalid environment configuration"),
+		Transactions:     &memoryTransactionStore{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := manager.State()
+	if state.Ready || state.ErrorCode == "" || !state.Config.DisablePasswordLogin {
+		t.Fatalf("invalid environment configuration lost fail-closed policy: %+v", state)
+	}
+}
+
 func TestManagerAuditsRejectedUpdatesWithStableSecretFreeResult(t *testing.T) {
 	repository := newMemoryConfigRepository()
 	manager, err := NewManager(context.Background(), Options{

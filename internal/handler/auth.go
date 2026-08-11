@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -42,6 +43,10 @@ type oidcRuntime interface {
 
 const passwordLoginDisabledCode = "password_login_disabled"
 const minimumPasswordLength = 6
+
+func passwordHasMinimumLength(password string) bool {
+	return utf8.RuneCountInString(password) >= minimumPasswordLength
+}
 
 func NewAuthHandler() *AuthHandler {
 	runtime, err := NewOIDCRuntime()
@@ -118,7 +123,7 @@ func (h *AuthHandler) registerWithState(c *gin.Context, state oidcruntime.State)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if len(req.Password) < minimumPasswordLength {
+	if !passwordHasMinimumLength(req.Password) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
 		return
 	}
@@ -321,7 +326,7 @@ func (h *AuthHandler) SetInitialPassword(c *gin.Context) {
 	var req struct {
 		NewPassword string `json:"newPassword"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < minimumPasswordLength {
+	if err := c.ShouldBindJSON(&req); err != nil || !passwordHasMinimumLength(req.NewPassword) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters"})
 		return
 	}
@@ -466,7 +471,7 @@ func (h *AuthHandler) UpdateUser(c *gin.Context) {
 
 	switch req.Action {
 	case "changePassword":
-		if len(req.NewPassword) < minimumPasswordLength {
+		if !passwordHasMinimumLength(req.NewPassword) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters"})
 			return
 		}
@@ -660,7 +665,7 @@ func (h *AuthHandler) CreateUserByAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if len(req.Password) < minimumPasswordLength {
+	if !passwordHasMinimumLength(req.Password) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
 		return
 	}

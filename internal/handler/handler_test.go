@@ -423,6 +423,60 @@ func TestAuthValidation(t *testing.T) {
 	}
 }
 
+func TestPasswordCreationRoutesCountUnicodeCharacters(t *testing.T) {
+	r := setupTestRouter(t)
+	shortUnicodePassword := "密码"
+
+	register := performRequest(r, http.MethodPost, "/api/auth/register", map[string]string{
+		"username": "unicode-user", "password": shortUnicodePassword,
+	})
+	if register.Code != http.StatusBadRequest {
+		t.Fatalf("register short Unicode password status = %d: %s", register.Code, register.Body.String())
+	}
+
+	adminCookie := registerAndLogin(t, r)
+	createUser := performAuthedRequest(r, http.MethodPost, "/api/auth/users", map[string]string{
+		"username": "unicode-reader", "password": shortUnicodePassword, "role": "user",
+	}, adminCookie)
+	if createUser.Code != http.StatusBadRequest {
+		t.Fatalf("admin create short Unicode password status = %d: %s", createUser.Code, createUser.Body.String())
+	}
+	validUnicode := performAuthedRequest(r, http.MethodPost, "/api/auth/users", map[string]string{
+		"username": "unicode-valid", "password": "密码安全可靠", "role": "user",
+	}, adminCookie)
+	if validUnicode.Code != http.StatusOK {
+		t.Fatalf("admin create six-character Unicode password status = %d: %s", validUnicode.Code, validUnicode.Body.String())
+	}
+
+	changePassword := performAuthedRequest(r, http.MethodPut, "/api/auth/users", map[string]string{
+		"action": "changePassword", "oldPassword": "password123", "newPassword": shortUnicodePassword,
+	}, adminCookie)
+	if changePassword.Code != http.StatusBadRequest {
+		t.Fatalf("change short Unicode password status = %d: %s", changePassword.Code, changePassword.Body.String())
+	}
+
+	oidcOnlyUser := &model.User{ID: "unicode-oidc-only", Username: "unicode-oidc", Role: "user"}
+	if err := store.CreateUser(oidcOnlyUser); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(&model.UserSession{
+		ID: "unicode-oidc-session", UserID: oidcOnlyUser.ID, ExpiresAt: time.Now().Add(time.Hour),
+		AuthMethod: model.SessionAuthMethodOIDC, AuthenticatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setInitial := performAuthedRequest(r, http.MethodPost, "/api/auth/password", map[string]string{
+		"newPassword": shortUnicodePassword,
+	}, "unicode-oidc-session")
+	if setInitial.Code != http.StatusBadRequest {
+		t.Fatalf("initial short Unicode password status = %d: %s", setInitial.Code, setInitial.Body.String())
+	}
+	stored, err := store.GetUserByID(oidcOnlyUser.ID)
+	if err != nil || stored == nil || stored.Password != "" {
+		t.Fatalf("rejected Unicode password changed OIDC-only user: %+v, %v", stored, err)
+	}
+}
+
 func TestComicsEndpoints(t *testing.T) {
 	r := setupTestRouter(t)
 	cookie := registerAndLogin(t, r)

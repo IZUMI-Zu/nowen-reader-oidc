@@ -244,7 +244,8 @@ func (h *ImageHandler) GetPageImage(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", result.MimeType)
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Content-Length", strconv.Itoa(len(result.Data)))
 	c.Header("ETag", etag)
 	c.Data(http.StatusOK, result.MimeType, result.Data)
@@ -746,7 +747,8 @@ func (h *ImageHandler) GetPdfFile(c *gin.Context) {
 	c.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 	c.Header("Content-Disposition", "inline") // 防止微信浏览器触发下载
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Header("Cache-Control", "public, max-age=86400")
+	c.Header("Cache-Control", "private, max-age=86400")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Accept-Ranges", "bytes")
 
 	// 支持 Range 请求（PDF.js 需要）
@@ -838,7 +840,8 @@ func (h *ImageHandler) GetEpubResource(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", result.MimeType)
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Content-Length", strconv.Itoa(len(result.Data)))
 	c.Header("ETag", etag)
 	c.Data(http.StatusOK, result.MimeType, result.Data)
@@ -976,7 +979,8 @@ func (h *ImageHandler) GetEmbeddedImage(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", img.MimeType)
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Content-Length", strconv.Itoa(len(img.Data)))
 	c.Header("ETag", etag)
 	c.Data(http.StatusOK, img.MimeType, img.Data)

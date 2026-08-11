@@ -278,4 +278,53 @@ describe("OIDCSettingsPanel", () => {
     expect(stored).not.toContain("typed-secret-sentinel");
     expect(JSON.parse(stored).requiresSecretReentry).toBe(expected);
   });
+
+  // Someone else may have saved while the operator was away reauthenticating. Restoring
+  // the stale draft would silently overwrite their change, so it must be dropped.
+  test("drops a resumed draft whose revision no longer matches the server", async () => {
+    mocks.authUser.hasPassword = false;
+    const current = managedConfig({ revision: 9 });
+    expect(storeOIDCResumeState(window, {
+      version: 1,
+      action: "save",
+      revision: current.revision - 1,
+      form: {
+        enabled: true,
+        issuerURL: "https://stale-identity.example.com",
+        clientID: "stale-client",
+        providerName: "Stale Login",
+        scopes: "openid email",
+        publicURL: "https://reader.example.com",
+        autoProvision: false,
+        sessionTTLHours: 8,
+        disablePasswordLogin: false,
+      },
+      clearSecret: true,
+      confirmOIDCOnlyUsers: true,
+      confirmDisablePasswordLogin: true,
+      requiresSecretReentry: false,
+    })).toBe(true);
+    window.history.replaceState({}, "", "/settings?tab=authentication&oidc_admin_resume=1");
+    mocks.get.mockResolvedValue(current);
+
+    render(<OIDCSettingsPanel />);
+
+    await screen.findByText("The OIDC configuration changed, so the previous action was not resumed. Review the current configuration.");
+    expect((screen.getByLabelText("Issuer URL") as HTMLInputElement).value).toBe(current.config.issuerURL);
+    expect((screen.getByRole("checkbox", { name: "Clear the stored secret when saving" }) as HTMLInputElement).checked).toBe(false);
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  // Discovery alone never proves the secret works, so the real test login stays
+  // unavailable until a secret is actually stored.
+  test("offers the real test login only once a Client Secret is stored", async () => {
+    mocks.get.mockResolvedValue(managedConfig({ clientSecretConfigured: false }));
+
+    render(<OIDCSettingsPanel />);
+
+    const testLogin = await screen.findByRole("button", { name: "Run real test login" });
+    expect((testLogin as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(testLogin);
+    expect(mocks.beginTestLogin).not.toHaveBeenCalled();
+  });
 });

@@ -6,6 +6,7 @@ import { useTranslation, useLocale } from "@/lib/i18n";
 import { Search, Download, Check, Loader2, BookOpen, FileSearch, Filter } from "lucide-react";
 import { emitScrapeApplied } from "@/lib/sync-event";
 import { useEHentaiSettings } from "@/hooks/useEHentaiSettings";
+import { MetadataCoverPreview } from "@/components/MetadataCoverPreview";
 
 interface MetadataResult {
   title?: string;
@@ -295,11 +296,9 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
             >
               <div className="flex items-start justify-between gap-2">
                 {result.coverUrl && (
-                  <img
-                    src={result.coverUrl}
-                    alt={result.title || "cover"}
-                    className="w-12 h-16 object-cover rounded flex-shrink-0 bg-card-hover"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                  <MetadataCoverPreview
+                    coverUrl={result.coverUrl}
+                    title={result.title}
                   />
                 )}
                 <div className="flex-1 min-w-0">

@@ -4,6 +4,7 @@ import React, { useState, useCallback, useEffect } from "react";
 import { useTranslation, useLocale } from "@/lib/i18n";
 import { apiPath } from "@/lib/base-path";
 import { useEHentaiSettings } from "@/hooks/useEHentaiSettings";
+import { MetadataCoverPreview } from "@/components/MetadataCoverPreview";
 import {
   Search,
   Download,
@@ -530,11 +531,9 @@ export function GroupMetadataSearch({
             <div key={i} className="p-3 bg-card border border-border rounded-lg">
               <div className="flex items-start justify-between gap-2">
                 {result.coverUrl && (
-                  <img
-                    src={result.coverUrl}
-                    alt={result.title || "cover"}
-                    className="w-12 h-16 object-cover rounded flex-shrink-0 bg-card-hover"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                  <MetadataCoverPreview
+                    coverUrl={result.coverUrl}
+                    title={result.title}
                   />
                 )}
                 <div className="flex-1 min-w-0">

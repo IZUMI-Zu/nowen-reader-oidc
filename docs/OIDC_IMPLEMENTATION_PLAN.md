@@ -1,6 +1,6 @@
 # NowenReader OIDC 实施计划
 
-状态：Web Phase 0–2 已实现；真实 Provider 验收与 Flutter 待后续阶段
+状态：Web Phase 0–3 已实现；真实 Provider 验收与 Flutter 待后续阶段
 日期：2026-08-10
 目标版本：待定
 
@@ -33,6 +33,7 @@ OIDC Provider
 - Web 登录入口、账号生命周期、API Key reauth 后自动恢复未完成操作。
 - OIDC 配置、Docker 和反向代理文档；密码登录与本地恢复路径保持可用。
 - 可选 fail-closed 密码登录开关；同时关闭自助注册，并保护最后一个 OIDC 身份不被解除。
+- 管理员 Web 配置、环境只读兼容、AES-GCM Client Secret 保护、Discovery 检查、真实测试登录和运行时热切换。
 
 尚未完成：
 
@@ -292,14 +293,18 @@ RequireRecentAuthentication(maxAge time.Duration)
 
 ## 9. 配置
 
-第一版使用环境变量，不把 client secret 写入 `site-config.json` 或返回前端。
+当前版本同时支持管理员 Web 托管和完整环境变量托管，绝不逐字段混用。Web 托管的 Client Secret 加密后存入专用 SQLite 表，接口只返回 `clientSecretConfigured`；环境托管模式下后台只读。组件选择和具体实施分别见 [OIDC Web 管理组件调研](./OIDC_WEB_ADMIN_COMPONENT_RESEARCH.md) 与 [OIDC Web 管理实施计划](./OIDC_WEB_ADMIN_IMPLEMENTATION_PLAN.md)。
 
 | 变量 | 默认值 | 说明 |
 |:---|:---|:---|
+| `OIDC_CONFIG_MODE` | `auto` | `auto` / `environment` / `database` 配置来源 |
+| `OIDC_CONFIG_KEY_FILE` | — | Web 托管 secret 的外部 32-byte 根密钥文件 |
+| `OIDC_FORCE_PASSWORD_LOGIN` | `false` | 部署侧强制恢复密码入口 |
 | `OIDC_ENABLED` | `false` | 总开关 |
 | `OIDC_ISSUER_URL` | — | Provider issuer；生产必须 HTTPS |
 | `OIDC_CLIENT_ID` | — | Web confidential client ID |
-| `OIDC_CLIENT_SECRET` | — | Web client secret，支持 Docker secret/file 形式作为后续兼容项 |
+| `OIDC_CLIENT_SECRET` | — | 环境托管 Web client secret |
+| `OIDC_CLIENT_SECRET_FILE` | — | 环境托管 secret 文件，与明文变量互斥 |
 | `OIDC_NATIVE_CLIENT_ID` | — | Flutter public native client ID，仅 Flutter 阶段启用 |
 | `PUBLIC_URL` | — | 明确的外部 origin，例如 `https://reader.example.com` |
 | `OIDC_DISPLAY_NAME` | `OpenID Connect` | 登录按钮名称 |
@@ -538,7 +543,16 @@ CI 目前主要覆盖 Go；OIDC 合并前应把前端构建，以及进入 Flutt
 
 退出条件：Web 端端到端场景和敏感操作矩阵通过。
 
-### Phase 3：文档与真实 Provider 验收（1–2 人日）
+### Phase 3：管理员后台配置（已完成）
+
+- 专用 SQLite 配置仓储、AES-GCM Client Secret 保护和审计。
+- 环境/Web 整套来源解析、运行时不可变快照和无重启热切换。
+- Discovery 检查、真实测试登录、管理员绑定和防锁死门禁。
+- 仅管理员可见的“登录与认证”页面、中英文文案和恢复说明。
+
+退出条件：后台配置闭环、安全及并发测试通过，现有环境托管部署保持兼容。详细拆分见 [OIDC Web 管理实施计划](./OIDC_WEB_ADMIN_IMPLEMENTATION_PLAN.md)。
+
+### Phase 4：文档与真实 Provider 验收（1–2 人日）
 
 - 配置、Docker、反向代理、Provider 注册说明。
 - Keycloak/Authentik/Authelia 至少两个真实烟测。
@@ -546,14 +560,14 @@ CI 目前主要覆盖 Go；OIDC 合并前应把前端构建，以及进入 Flutt
 
 退出条件：Web OIDC 达到可发布状态。
 
-### Phase 4：Flutter（额外 4–8 人日）
+### Phase 5：Flutter（额外 4–8 人日）
 
 - 完成原生流程 ADR 和组件验证。
 - Android/iOS 回调配置和系统浏览器流程。
 - Session 兑换、CookieJar、取消/离线恢复。
 - macOS/Windows/Linux/Web 按组件能力分别验收。
 
-预计 Web 完整交付为 **5–8 人日**；包含 Flutter 主流移动平台为 **9–14 人日**，全平台验收视回调组件能力约为 **10–16 人日**。
+现有 Web OIDC Phase 0–3 已实现。真实 Provider 验收仍需 **1–2 人日**；Flutter 仍按额外 **4–8 人日**估算。
 
 ## 17. 发布与回滚
 

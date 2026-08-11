@@ -29,7 +29,7 @@ func TestOIDCTransactionStoreConsumesBrowserBoundStateOnce(t *testing.T) {
 	repository := OIDCTransactionStore{}
 	transaction := oidcauth.LoginTransaction{
 		StateHash: "state-hash", BindingHash: "binding-hash", Nonce: "nonce",
-		PKCEVerifier: "verifier", Purpose: oidcauth.PurposeLogin, ReturnTo: "/books",
+		PKCEVerifier: "verifier", Purpose: oidcauth.PurposeConfigTest, SessionUserID: "admin", SessionID: "admin-session", ReturnTo: "/books",
 		CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
 	}
 	if err := repository.Create(context.Background(), transaction); err != nil {
@@ -43,7 +43,7 @@ func TestOIDCTransactionStoreConsumesBrowserBoundStateOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
-	if consumed.Nonce != "nonce" || consumed.PKCEVerifier != "verifier" || consumed.ReturnTo != "/books" {
+	if consumed.Nonce != "nonce" || consumed.PKCEVerifier != "verifier" || consumed.SessionUserID != "admin" || consumed.SessionID != "admin-session" || consumed.ReturnTo != "/books" {
 		t.Fatalf("consumed transaction = %+v", consumed)
 	}
 	if _, err := repository.Consume(context.Background(), "state-hash", "binding-hash", now); !errors.Is(err, oidcauth.ErrInvalidTransaction) {

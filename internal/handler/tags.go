@@ -16,9 +16,9 @@ func NewTagHandler() *TagHandler {
 	return &TagHandler{}
 }
 
-// GET /api/tags — List tags visible to the current user. Administrators retain
-// the global view used by Tag Manager; readers only see ComicTag entries usable
-// by the comic-list filter in libraries they can access.
+// GET /api/tags — List tags visible to the current user. scope=comics returns
+// only tags usable by the comic-list filter. Without a scope, administrators
+// retain the all-owner Tag Manager view while readers remain ComicTag-scoped.
 func (h *TagHandler) ListTags(c *gin.Context) {
 	user := middleware.GetCurrentUser(c)
 	if user == nil {
@@ -30,7 +30,10 @@ func (h *TagHandler) ListTags(c *gin.Context) {
 		tags []store.TagWithCount
 		err  error
 	)
-	if user.Role == "admin" {
+	comicScope := c.Query("scope") == "comics"
+	if user.Role == "admin" && comicScope {
+		tags, err = store.GetAllComicTags()
+	} else if user.Role == "admin" {
 		tags, err = store.GetAllTags()
 	} else {
 		var libraryIDs []string

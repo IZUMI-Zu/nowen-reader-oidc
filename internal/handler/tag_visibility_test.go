@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -117,9 +118,9 @@ func TestTagEndpointsRespectLibraryVisibility(t *testing.T) {
 		visibleComicTag: 1,
 		sharedTag:       1,
 	}
-	readerTagsResponse := performAuthedRequest(router, http.MethodGet, "/api/tags", nil, readerToken)
+	readerTagsResponse := performAuthedRequest(router, http.MethodGet, "/api/tags?scope=comics", nil, readerToken)
 	if readerTagsResponse.Code != http.StatusOK {
-		t.Fatalf("reader GET /api/tags = %d %s", readerTagsResponse.Code, readerTagsResponse.Body.String())
+		t.Fatalf("reader GET /api/tags?scope=comics = %d %s", readerTagsResponse.Code, readerTagsResponse.Body.String())
 	}
 	assertTagCounts(t, readerTagsResponse.Body.Bytes(), wantReaderTags)
 
@@ -135,6 +136,30 @@ func TestTagEndpointsRespectLibraryVisibility(t *testing.T) {
 	}
 	if adminTags[sharedTag] != 2 {
 		t.Fatalf("admin shared tag count = %d, want 2", adminTags[sharedTag])
+	}
+
+	wantAdminComicTags := map[string]int{
+		visibleComicTag: 1,
+		hiddenComicTag:  1,
+		sharedTag:       2,
+	}
+	adminComicTagsResponse := performAuthedRequest(router, http.MethodGet, "/api/tags?scope=comics", nil, adminToken)
+	if adminComicTagsResponse.Code != http.StatusOK {
+		t.Fatalf("admin GET /api/tags?scope=comics = %d %s", adminComicTagsResponse.Code, adminComicTagsResponse.Body.String())
+	}
+	assertTagCounts(t, adminComicTagsResponse.Body.Bytes(), wantAdminComicTags)
+	for tagName, wantCount := range wantAdminComicTags {
+		filtered := performAuthedRequest(router, http.MethodGet, "/api/comics?tags="+url.QueryEscape(tagName), nil, adminToken)
+		if filtered.Code != http.StatusOK {
+			t.Fatalf("admin comic filter %q = %d %s", tagName, filtered.Code, filtered.Body.String())
+		}
+		var result store.ComicListResult
+		if err := json.Unmarshal(filtered.Body.Bytes(), &result); err != nil {
+			t.Fatalf("decode comic filter %q: %v", tagName, err)
+		}
+		if result.Total != wantCount {
+			t.Fatalf("comic filter %q total = %d, tag count = %d", tagName, result.Total, wantCount)
+		}
 	}
 
 	exportResponse := performAuthedRequest(router, http.MethodGet, "/api/export/json", nil, readerToken)

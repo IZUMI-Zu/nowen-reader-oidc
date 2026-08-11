@@ -468,7 +468,7 @@ export default function BooksPage() {
   // Extract all unique tags — fetch from API once on mount (not on every apiComics change)
   const [allTags, setAllTags] = useState<string[]>([]);
   const fetchTags = useCallback(() => {
-    fetch(apiPath("/api/tags"))
+    fetch(apiPath("/api/tags?scope=comics"))
       .then((r) => r.json())
       .then((data) => {
         const tags = Array.isArray(data) ? data : data.tags;

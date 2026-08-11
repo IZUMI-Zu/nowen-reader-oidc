@@ -471,11 +471,24 @@ func GetComicTagsForLibraries(libraryIDs []string) ([]TagWithCount, error) {
 	if len(libraryIDs) == 0 {
 		return []TagWithCount{}, nil
 	}
+	return getComicTags(libraryIDs, true)
+}
 
-	marks := placeholders(len(libraryIDs))
-	args := make([]any, 0, len(libraryIDs))
-	for _, libraryID := range libraryIDs {
-		args = append(args, libraryID)
+// GetAllComicTags returns the global ComicTag view used by administrator comic
+// shelves. It intentionally excludes group and directory-series-only tags.
+func GetAllComicTags() ([]TagWithCount, error) {
+	return getComicTags(nil, false)
+}
+
+func getComicTags(libraryIDs []string, filterLibraries bool) ([]TagWithCount, error) {
+	whereClause := ""
+	args := []any{}
+	if filterLibraries {
+		whereClause = `WHERE c."libraryId" IN (` + placeholders(len(libraryIDs)) + `)`
+		args = make([]any, 0, len(libraryIDs))
+		for _, libraryID := range libraryIDs {
+			args = append(args, libraryID)
+		}
 	}
 
 	rows, err := db.Query(`
@@ -483,7 +496,7 @@ func GetComicTagsForLibraries(libraryIDs []string) ([]TagWithCount, error) {
 		FROM "Tag" t
 		JOIN "ComicTag" ct ON ct."tagId" = t."id"
 		JOIN "Comic" c ON c."id" = ct."comicId"
-		WHERE c."libraryId" IN (`+marks+`)
+		`+whereClause+`
 		GROUP BY t."id", t."name", t."color"
 		ORDER BY t."name" ASC
 	`, args...)

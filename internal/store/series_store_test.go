@@ -2,6 +2,7 @@ package store
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,7 +259,7 @@ func TestSeriesMetadataAndTagsSurviveDirectoryRefresh(t *testing.T) {
 	if len(detail.Unsectioned) != 2 || detail.Unsectioned[0].DisplayLabel != "已刷新结构" {
 		t.Fatalf("directory structure was not refreshed: %#v", detail.Unsectioned)
 	}
-	if got.CoverURL != "/api/comics/series_ser-metadata/thumbnail" {
+	if !strings.HasPrefix(got.CoverURL, "/api/comics/series_ser-metadata/thumbnail?v=") {
 		t.Fatalf("series cover URL = %q", got.CoverURL)
 	}
 	for _, comicID := range []string{"metadata-volume-1", "metadata-volume-2"} {

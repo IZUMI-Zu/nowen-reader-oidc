@@ -41,12 +41,16 @@ func BuildGroupCoverURL(groupID int, storedCoverURL string, updatedAt time.Time)
 	return fmt.Sprintf("%s?v=%x", base, version[:8])
 }
 
-func BuildSeriesCoverURL(seriesID string) string {
+// BuildSeriesCoverURL 构造目录作品封面缩略图 URL。版本号同时绑定数据库中的封面
+// 源和缓存文件的 mtime，因此封面换源后 URL 立即变化，不必等异步缓存落盘。
+func BuildSeriesCoverURL(seriesID, storedCoverURL string) string {
 	coverID := "series_" + seriesID
 	base := config.JoinBasePath(fmt.Sprintf("/api/comics/%s/thumbnail", coverID))
 	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.SeriesCoverCacheName(seriesID))
+	cachedAt := int64(0)
 	if info, err := os.Stat(cachePath); err == nil {
-		return fmt.Sprintf("%s?v=%d", base, info.ModTime().Unix())
+		cachedAt = info.ModTime().Unix()
 	}
-	return base
+	version := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d", storedCoverURL, cachedAt))
+	return fmt.Sprintf("%s?v=%x", base, version[:8])
 }

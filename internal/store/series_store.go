@@ -375,7 +375,7 @@ func seriesSummaryByID(id, userID string) (*SeriesSummary, error) {
 		_ = db.QueryRow(`SELECT "comicId" FROM "ComicSeriesItem" WHERE "seriesId" = ? ORDER BY "sortIndex", "comicId" LIMIT 1`, id).Scan(&summary.CoverComicID)
 	}
 	if storedCoverURL != "" {
-		summary.CoverURL = BuildSeriesCoverURL(id)
+		summary.CoverURL = BuildSeriesCoverURL(id, storedCoverURL)
 	} else if summary.CoverComicID != "" {
 		summary.CoverURL = BuildComicCoverURL(summary.CoverComicID)
 	}

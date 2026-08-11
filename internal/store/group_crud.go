@@ -444,7 +444,7 @@ func GetGroupByIDWithOptions(groupID int, opts GroupDetailOptions) (*ComicGroupD
 			cRows.Close()
 			if len(sItem.Comics) > 0 {
 				if storedCoverURL != "" {
-					sItem.CoverURL = BuildSeriesCoverURL(sItem.SeriesID)
+					sItem.CoverURL = BuildSeriesCoverURL(sItem.SeriesID, storedCoverURL)
 				} else if coverVisible {
 					sItem.CoverURL = BuildComicCoverURL(sItem.CoverComicID)
 				} else {

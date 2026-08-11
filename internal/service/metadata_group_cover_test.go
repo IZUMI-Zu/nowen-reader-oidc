@@ -269,8 +269,8 @@ func TestScheduleGroupCoverRefreshClearsOldCacheBeforeReturning(t *testing.T) {
 	// Hold the asynchronous worker before its own invalidation. This makes the
 	// assertion below prove that ScheduleGroupCoverRefresh itself clears the old
 	// cache synchronously instead of winning through goroutine scheduling.
-	blocked := &groupCoverDownloadState{coverURL: coverURL, done: make(chan struct{})}
-	groupCoverDownload.Store(groupID, blocked)
+	blocked := &coverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+	coverDownload.Store(groupCoverKey(groupID), blocked)
 	published := make(chan struct{})
 	groupCoverBeforePublish = func(id int) {
 		if id == groupID {
@@ -279,7 +279,7 @@ func TestScheduleGroupCoverRefreshClearsOldCacheBeforeReturning(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		groupCoverBeforePublish = nil
-		groupCoverDownload.Delete(groupID)
+		coverDownload.Delete(groupCoverKey(groupID))
 	})
 
 	ScheduleGroupCoverRefresh(groupID, coverURL, config.EHentaiSitePublic)
@@ -287,7 +287,7 @@ func TestScheduleGroupCoverRefreshClearsOldCacheBeforeReturning(t *testing.T) {
 		t.Fatalf("old cache still existed when refresh scheduling returned: %v", err)
 	}
 
-	groupCoverDownload.Delete(groupID)
+	coverDownload.Delete(groupCoverKey(groupID))
 	close(blocked.done)
 	select {
 	case <-published:
@@ -301,7 +301,7 @@ func waitGroupCoverDownloadIdle(t *testing.T, groupID int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, active := groupCoverDownload.Load(groupID); !active {
+		if _, active := coverDownload.Load(groupCoverKey(groupID)); !active {
 			return
 		}
 		time.Sleep(time.Millisecond)

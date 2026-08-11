@@ -10,6 +10,30 @@ import (
 	"github.com/nowen-reader/nowen-reader/internal/config"
 )
 
+func TestSeriesCoverURLChangesWhenStoredSourceChangesBeforeCacheReplacement(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	const seriesID = "ser-versioned-cover"
+	thumbDir := config.GetThumbnailsDir()
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(thumbDir, archive.SeriesCoverCacheName(seriesID))
+	if err := os.WriteFile(cachePath, []byte("old cached cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	coverA := "https://ul.ehgt.org/old-cover.png"
+	coverB := "https://ul.ehgt.org/new-cover.png"
+	before := BuildSeriesCoverURL(seriesID, coverA)
+	after := BuildSeriesCoverURL(seriesID, coverB)
+	if before == after {
+		t.Fatalf("cover URL stayed %q after stored source changed while old cache remained", after)
+	}
+	if strings.Contains(after, coverA) || strings.Contains(after, coverB) {
+		t.Fatalf("cover URL leaked a stored remote source: %q", after)
+	}
+}
+
 func TestGroupCoverURLChangesWhenStoredSourceChangesBeforeCacheReplacement(t *testing.T) {
 	t.Setenv("DATA_DIR", t.TempDir())
 	setupTestDB(t)

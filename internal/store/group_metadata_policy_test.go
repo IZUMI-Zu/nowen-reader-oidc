@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -114,8 +115,9 @@ func TestSingleSeriesGroupInheritsSeriesMetadataWithoutMemberSync(t *testing.T) 
 		group.Year == nil || *group.Year != year {
 		t.Fatalf("unexpected inherited group: %#v", group)
 	}
-	if len(group.SeriesList) != 1 || group.SeriesList[0].CoverURL != "/api/comics/series_group-series-source/thumbnail" ||
-		group.CoverURL != "/api/comics/series_group-series-source/thumbnail" {
+	if len(group.SeriesList) != 1 ||
+		!strings.HasPrefix(group.SeriesList[0].CoverURL, "/api/comics/series_group-series-source/thumbnail?v=") ||
+		group.CoverURL != group.SeriesList[0].CoverURL {
 		t.Fatalf("series cover was not inherited dynamically: %#v", group.SeriesList)
 	}
 	tags, err := GetGroupTags(groupID)

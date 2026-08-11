@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
@@ -22,19 +23,18 @@ const maxCoverDownloadBytes = 20 << 20
 
 var errEHCoverRequest = errors.New("E-Hentai cover request failed")
 
-type groupCoverDownloadState struct {
+type coverDownloadState struct {
 	coverURL string
 	done     chan struct{}
 }
 
-// 合集封面下载去重：同一 groupID 同时只有一个下载任务。等待者会比较
-// URL，避免旧任务完成后让新的封面更新误用旧缓存。
-var groupCoverDownload sync.Map  // groupID -> *groupCoverDownloadState
-var seriesCoverDownload sync.Map // seriesID -> chan struct{}
+// 封面下载去重：同一封面 key（合集或目录作品）同时只有一个下载任务。等待者
+// 会比较 URL，避免旧任务完成后让新的封面更新误用旧缓存。
+var coverDownload sync.Map // cover key -> *coverDownloadState
 
-const groupCoverPublishLockCount = 64
+const coverPublishLockCount = 64
 
-var groupCoverPublishLocks [groupCoverPublishLockCount]sync.Mutex
+var coverPublishLocks [coverPublishLockCount]sync.Mutex
 
 // Test seam invoked while the group-cover publication lock is held, after the
 // current URL check and immediately before the cache is replaced.
@@ -292,17 +292,18 @@ func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string, rep
 
 	cacheName := archive.GroupCoverCacheName(groupID)
 	cachePath := filepath.Join(thumbDir, cacheName)
-	if !replace && groupCoverCacheExists(cachePath) {
+	if !replace && coverCacheExists(cachePath) {
 		return
 	}
 
+	key := groupCoverKey(groupID)
 	for {
-		state := &groupCoverDownloadState{coverURL: coverURL, done: make(chan struct{})}
-		activeValue, loaded := groupCoverDownload.LoadOrStore(groupID, state)
+		state := &coverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+		activeValue, loaded := coverDownload.LoadOrStore(key, state)
 		if loaded {
-			active := activeValue.(*groupCoverDownloadState)
+			active := activeValue.(*coverDownloadState)
 			<-active.done
-			if active.coverURL == coverURL && groupCoverCacheExists(cachePath) {
+			if active.coverURL == coverURL && coverCacheExists(cachePath) {
 				return
 			}
 			// A different URL finished. Acquire the next slot so this request can
@@ -316,12 +317,12 @@ func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string, rep
 		func() {
 			defer func() {
 				close(state.done)
-				groupCoverDownload.Delete(groupID)
+				coverDownload.Delete(key)
 			}()
 			if !groupCoverURLIsCurrent(groupID, coverURL) {
 				return
 			}
-			if !replace && groupCoverCacheExists(cachePath) {
+			if !replace && coverCacheExists(cachePath) {
 				return
 			}
 			if replace {
@@ -333,32 +334,45 @@ func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string, rep
 	}
 }
 
-func groupCoverCacheExists(cachePath string) bool {
+func coverCacheExists(cachePath string) bool {
 	data, err := os.ReadFile(cachePath)
 	return err == nil && len(data) > 0
 }
 
-func groupCoverURLIsCurrent(groupID int, coverURL string) bool {
-	storedURL, err := store.GetGroupStoredCoverURL(groupID)
-	if err != nil {
-		return false
-	}
-	storedURL = strings.Replace(strings.TrimSpace(storedURL), "http://", "https://", 1)
-	return storedURL == coverURL
+func groupCoverKey(groupID int) string {
+	return fmt.Sprintf("group_%d", groupID)
 }
 
-func groupCoverPublishLock(groupID int) *sync.Mutex {
-	index := groupID % groupCoverPublishLockCount
-	if index < 0 {
-		index = -index
-	}
-	return &groupCoverPublishLocks[index]
+func seriesCoverKey(seriesID string) string {
+	return "series_" + seriesID
+}
+
+// normalizeStoredCoverURL 复用写入时的规范化规则，让"数据库里现在还是不是这个
+// 封面"的比较不会因为 http/https 或空白而误判。
+func normalizeStoredCoverURL(coverURL string) string {
+	return strings.Replace(strings.TrimSpace(coverURL), "http://", "https://", 1)
+}
+
+func groupCoverURLIsCurrent(groupID int, coverURL string) bool {
+	storedURL, err := store.GetGroupStoredCoverURL(groupID)
+	return err == nil && normalizeStoredCoverURL(storedURL) == coverURL
+}
+
+func seriesCoverURLIsCurrent(seriesID, coverURL string) bool {
+	storedURL, err := store.GetSeriesStoredCoverURL(seriesID)
+	return err == nil && normalizeStoredCoverURL(storedURL) == coverURL
+}
+
+func coverPublishLock(key string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(key))
+	return &coverPublishLocks[hash.Sum32()%coverPublishLockCount]
 }
 
 // ClearGroupCoverCache serializes cache invalidation with remote and data URL
 // publication so an older in-flight request cannot recreate a cleared cover.
 func ClearGroupCoverCache(groupID int) {
-	lock := groupCoverPublishLock(groupID)
+	lock := coverPublishLock(groupCoverKey(groupID))
 	lock.Lock()
 	defer lock.Unlock()
 	archive.ClearGroupCoverCache(groupID)
@@ -394,7 +408,7 @@ func downloadGroupCoverToLocalInternal(groupID int, coverURL, metadataSource, th
 		log.Printf("[metadata] Group cover cache failed for group %d: %v", groupID, err)
 		return
 	}
-	lock := groupCoverPublishLock(groupID)
+	lock := coverPublishLock(groupCoverKey(groupID))
 	lock.Lock()
 	defer lock.Unlock()
 	if !groupCoverURLIsCurrent(groupID, coverURL) {
@@ -434,7 +448,7 @@ func CacheGroupCoverDataURL(groupID int, coverDataURL string) error {
 	if err != nil {
 		return err
 	}
-	lock := groupCoverPublishLock(groupID)
+	lock := coverPublishLock(groupCoverKey(groupID))
 	lock.Lock()
 	defer lock.Unlock()
 	storedURL, err := store.GetGroupStoredCoverURL(groupID)
@@ -470,17 +484,36 @@ func DownloadSeriesCover(seriesID, coverURL string, metadataSources ...string) {
 		return
 	}
 	cachePath := filepath.Join(thumbDir, archive.SeriesCoverCacheName(seriesID))
-	ch, loaded := seriesCoverDownload.LoadOrStore(seriesID, make(chan struct{}))
-	done := ch.(chan struct{})
-	if loaded {
-		<-done
+	key := seriesCoverKey(seriesID)
+	for {
+		state := &coverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+		activeValue, loaded := coverDownload.LoadOrStore(key, state)
+		if loaded {
+			active := activeValue.(*coverDownloadState)
+			<-active.done
+			if active.coverURL == coverURL && coverCacheExists(cachePath) {
+				return
+			}
+			// A different URL finished. Take the next slot so this request can
+			// replace it, unless the database says this request is now stale.
+			if !seriesCoverURLIsCurrent(seriesID, coverURL) {
+				return
+			}
+			continue
+		}
+
+		func() {
+			defer func() {
+				close(state.done)
+				coverDownload.Delete(key)
+			}()
+			downloadSeriesCoverToLocal(seriesID, coverURL, metadataSource, cachePath)
+		}()
 		return
 	}
-	defer func() {
-		close(done)
-		seriesCoverDownload.Delete(seriesID)
-	}()
+}
 
+func downloadSeriesCoverToLocal(seriesID, coverURL, metadataSource, cachePath string) {
 	client := metadataCoverHTTPClient(metadataSource)
 	req, err := http.NewRequest(http.MethodGet, coverURL, nil)
 	if err != nil {
@@ -501,6 +534,13 @@ func DownloadSeriesCover(seriesID, coverURL string, metadataSources ...string) {
 	}
 	webpData, _, err := archive.ResizeImageToWebP(imgData, config.GetThumbnailWidth(), config.GetThumbnailHeight(), 85)
 	if err != nil {
+		return
+	}
+	lock := coverPublishLock(seriesCoverKey(seriesID))
+	lock.Lock()
+	defer lock.Unlock()
+	if !seriesCoverURLIsCurrent(seriesID, coverURL) {
+		// A newer cover won while this download was in flight.
 		return
 	}
 	archive.ClearSeriesCoverCache(seriesID)

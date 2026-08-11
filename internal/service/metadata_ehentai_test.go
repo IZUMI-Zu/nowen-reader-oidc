@@ -681,10 +681,19 @@ func TestApplyEHentaiMetadataKeepsGenreAndTagsTogetherWithoutOverwrite(t *testin
 	if err != nil || comic == nil {
 		t.Fatalf("GetComicByID() error = %v", err)
 	}
+	gotTags := make(map[string]bool, len(comic.Tags))
 	for _, tag := range comic.Tags {
-		if tag.Name == newSource {
-			t.Fatalf("gallery identity moved to %q while genre stayed %q", newSource, comic.Genre)
-		}
+		gotTags[tag.Name] = true
+	}
+	if gotTags[newSource] {
+		t.Fatalf("gallery identity moved to %q while genre stayed %q", newSource, comic.Genre)
+	}
+	if !gotTags[oldSource] {
+		t.Fatalf("gallery identity was dropped from the tags: %#v", gotTags)
+	}
+	// 冻结的只有画廊身份，其余标签仍然照常追加。
+	if !gotTags["artist:updated"] {
+		t.Fatalf("content tags were not appended: %#v", gotTags)
 	}
 	if !strings.Contains(comic.Genre, oldSource) {
 		t.Fatalf("genre lost its gallery source: %q", comic.Genre)

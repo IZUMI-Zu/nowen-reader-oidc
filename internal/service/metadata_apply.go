@@ -129,17 +129,20 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 	// gallery identity can be committed by one store transaction.
 	var tagNames []string
 	var replaceMatcher func(string) bool
-	if genreApplied {
-		for _, rawTag := range strings.Split(meta.Genre, ",") {
-			tagName := strings.TrimSpace(rawTag)
-			if tagName == "" {
+	for _, rawTag := range strings.Split(meta.Genre, ",") {
+		tagName := strings.TrimSpace(rawTag)
+		if tagName == "" {
+			continue
+		}
+		if IsEHentaiGallerySourceTag(tagName) {
+			// gallery 身份要跟 genre 文本走：genre 这次没更新就不能换 source
+			// 标签，否则展示的画廊和搜索直达的画廊会是两个。其余标签照旧追加。
+			if !genreApplied {
 				continue
 			}
-			tagNames = append(tagNames, tagName)
-			if IsEHentaiGallerySourceTag(tagName) {
-				replaceMatcher = IsEHentaiGallerySourceTag
-			}
+			replaceMatcher = IsEHentaiGallerySourceTag
 		}
+		tagNames = append(tagNames, tagName)
 	}
 
 	if len(tagNames) > 0 {

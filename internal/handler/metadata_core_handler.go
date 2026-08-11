@@ -69,9 +69,7 @@ func (h *MetadataHandler) Search(c *gin.Context) {
 			c.JSON(500, gin.H{"error": "failed to load comic search context"})
 			return
 		}
-		// 只有在沿用作品当前标题搜索时才复用已存的画廊标签。用户改写查询
-		// 通常正是为了纠正上一次选错的画廊，此时必须按标题重新搜索。
-		if comic != nil && strings.TrimSpace(query) == strings.TrimSpace(comic.Title) {
+		if comic != nil && searchReusesStoredGallery(query, comic.Title) {
 			options.EHentaiExistingTags = make([]string, 0, len(comic.Tags))
 			for _, tag := range comic.Tags {
 				options.EHentaiExistingTags = append(options.EHentaiExistingTags, tag.Name)

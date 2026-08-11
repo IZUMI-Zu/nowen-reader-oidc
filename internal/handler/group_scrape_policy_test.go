@@ -90,7 +90,7 @@ func TestOwnerScrapePassesStoredTagsOnlyToEHOptions(t *testing.T) {
 	t.Cleanup(func() { searchMetadataWithOptionsContext = originalSearch })
 
 	groupResponse := performAuthedRequest(router, http.MethodPost, "/api/groups/"+strconv.FormatInt(groupID, 10)+"/scrape-metadata", map[string]interface{}{
-		"query":       "group-query",
+		"query":       "Group Search",
 		"sources":     []string{"ehentai"},
 		"contentType": "comic",
 	}, cookie)
@@ -98,7 +98,7 @@ func TestOwnerScrapePassesStoredTagsOnlyToEHOptions(t *testing.T) {
 		t.Fatalf("group scrape status = %d, body = %s", groupResponse.Code, groupResponse.Body.String())
 	}
 	seriesResponse := performAuthedRequest(router, http.MethodPost, "/api/series/owner-search-series/scrape-metadata", map[string]interface{}{
-		"query":   "series-query",
+		"query":   "Series Search",
 		"sources": []string{"ehentai"},
 	}, cookie)
 	if seriesResponse.Code != http.StatusOK {
@@ -122,10 +122,30 @@ func TestOwnerScrapePassesStoredTagsOnlyToEHOptions(t *testing.T) {
 		t.Fatalf("non-EH group scrape status = %d, body = %s", nonEHResponse.Code, nonEHResponse.Body.String())
 	}
 
-	if len(captured) != 4 {
-		t.Fatalf("captured searches = %#v, want 4", captured)
+	// 改写搜索词是为了纠正上一次选错的画廊，此时不能再复用已存的 source: 标签。
+	rewrittenResponse := performAuthedRequest(router, http.MethodPost, "/api/groups/"+strconv.FormatInt(groupID, 10)+"/scrape-metadata", map[string]interface{}{
+		"query":       "a different group title",
+		"sources":     []string{"ehentai"},
+		"contentType": "comic",
+	}, cookie)
+	if rewrittenResponse.Code != http.StatusOK {
+		t.Fatalf("rewritten group scrape status = %d, body = %s", rewrittenResponse.Code, rewrittenResponse.Body.String())
 	}
-	if captured[0].query != "group-query" || captured[1].query != "series-query" || captured[2].query != "Group Search" || captured[3].query != "group-non-eh-query" {
+	rewrittenSeriesResponse := performAuthedRequest(router, http.MethodPost, "/api/series/owner-search-series/scrape-metadata", map[string]interface{}{
+		"query":   "a different series title",
+		"sources": []string{"ehentai"},
+	}, cookie)
+	if rewrittenSeriesResponse.Code != http.StatusOK {
+		t.Fatalf("rewritten series scrape status = %d, body = %s", rewrittenSeriesResponse.Code, rewrittenSeriesResponse.Body.String())
+	}
+
+	if len(captured) != 6 {
+		t.Fatalf("captured searches = %#v, want 6", captured)
+	}
+	if len(captured[4].tags) != 0 || len(captured[5].tags) != 0 {
+		t.Fatalf("rewritten queries stayed pinned to the stored gallery: %#v", captured[4:])
+	}
+	if captured[0].query != "Group Search" || captured[1].query != "Series Search" || captured[2].query != "Group Search" || captured[3].query != "group-non-eh-query" {
 		t.Fatalf("captured query order = %#v", captured)
 	}
 	assertStringsExactly(t, groupTags, captured[0].tags)

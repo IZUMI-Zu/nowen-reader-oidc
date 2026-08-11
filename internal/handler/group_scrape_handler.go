@@ -68,7 +68,7 @@ func (h *GroupHandler) ScrapeMetadata(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"results": []service.ComicMetadata{}, "detectedContentType": ct})
 		return
 	}
-	options, err := groupMetadataSearchOptions(id, sources)
+	options, err := groupMetadataSearchOptions(id, sources, query, group.Name)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取合集标签失败"})
 		return
@@ -80,20 +80,26 @@ func (h *GroupHandler) ScrapeMetadata(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"results": results, "detectedContentType": ct})
 }
 
-func groupMetadataSearchOptions(groupID int, sources []string) (service.MetadataSearchOptions, error) {
-	if !includesMetadataSource(sources, "ehentai") {
+// searchReusesStoredGallery 判断这次搜索是否还能复用已存的 EH 画廊标签。用户改写
+// 搜索词通常正是为了纠正上一次选错的画廊，此时必须按新词重新搜索。
+func searchReusesStoredGallery(query, storedTitle string) bool {
+	return strings.TrimSpace(query) == strings.TrimSpace(storedTitle)
+}
+
+func groupMetadataSearchOptions(groupID int, sources []string, query, storedTitle string) (service.MetadataSearchOptions, error) {
+	if !includesMetadataSource(sources, "ehentai") || !searchReusesStoredGallery(query, storedTitle) {
 		return service.MetadataSearchOptions{}, nil
 	}
 	tags, err := store.GetGroupTags(groupID)
 	if err != nil {
 		return service.MetadataSearchOptions{}, err
 	}
-	return metadataSearchOptionsForTags(sources, tags), nil
+	return metadataSearchOptionsForTags(sources, tags, query, storedTitle), nil
 }
 
-func metadataSearchOptionsForTags(sources []string, tags []store.Tag) service.MetadataSearchOptions {
+func metadataSearchOptionsForTags(sources []string, tags []store.Tag, query, storedTitle string) service.MetadataSearchOptions {
 	options := service.MetadataSearchOptions{}
-	if !includesMetadataSource(sources, "ehentai") {
+	if !includesMetadataSource(sources, "ehentai") || !searchReusesStoredGallery(query, storedTitle) {
 		return options
 	}
 	options.EHentaiExistingTags = make([]string, 0, len(tags))

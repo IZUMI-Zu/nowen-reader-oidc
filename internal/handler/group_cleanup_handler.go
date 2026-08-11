@@ -232,7 +232,7 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 			results = append(results, result)
 			continue
 		}
-		options, optionsErr := groupMetadataSearchOptions(gid, sources)
+		options, optionsErr := groupMetadataSearchOptions(gid, sources, group.Name, group.Name)
 		if optionsErr != nil {
 			result.Error = "读取合集标签失败"
 			results = append(results, result)

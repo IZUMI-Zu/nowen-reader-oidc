@@ -23,6 +23,7 @@ type memoryConfigRepository struct {
 	actorHasPassword bool
 	oidcOnlyUsers    int64
 	audits           []AuditEvent
+	beforeSave       func(*memoryConfigRepository)
 }
 
 func TestProtocolFingerprintUsesOpaqueSecretVersionNotPlaintextSecret(t *testing.T) {
@@ -55,6 +56,10 @@ func (r *memoryConfigRepository) Load(context.Context) (StoredConfig, error) {
 func (r *memoryConfigRepository) Save(_ context.Context, request SaveRequest) (StoredConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if beforeSave := r.beforeSave; beforeSave != nil {
+		r.beforeSave = nil
+		beforeSave(r)
+	}
 	if r.record.Revision != request.ExpectedRevision {
 		return StoredConfig{}, ErrConfigConflict
 	}
@@ -76,6 +81,89 @@ func (r *memoryConfigRepository) Save(_ context.Context, request SaveRequest) (S
 	r.record = cloneStoredConfig(next)
 	r.audits = append(r.audits, request.Audit)
 	return cloneStoredConfig(r.record), nil
+}
+
+func TestApplyRechecksAccountSafetyAtSaveBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*memoryConfigRepository, *AdminFields, *UpdateRequest)
+		wantErr error
+	}{
+		{
+			name: "administrator identity was unlinked after preflight",
+			prepare: func(repository *memoryConfigRepository, _ *AdminFields, _ *UpdateRequest) {
+				repository.beforeSave = func(repository *memoryConfigRepository) { repository.adminLinked = false }
+			},
+			wantErr: ErrAdminIdentityRequired,
+		},
+		{
+			name: "recovery password was removed after preflight",
+			prepare: func(repository *memoryConfigRepository, fields *AdminFields, request *UpdateRequest) {
+				fields.DisablePasswordLogin = true
+				request.ConfirmDisablePasswordLogin = true
+				repository.beforeSave = func(repository *memoryConfigRepository) { repository.actorHasPassword = false }
+			},
+			wantErr: ErrBreakGlassPasswordRequired,
+		},
+		{
+			name: "OIDC-only user appeared after preflight",
+			prepare: func(repository *memoryConfigRepository, fields *AdminFields, _ *UpdateRequest) {
+				fields.Enabled = false
+				repository.beforeSave = func(repository *memoryConfigRepository) { repository.oidcOnlyUsers = 1 }
+			},
+			wantErr: ErrOIDCOnlyUsersConfirmation,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			protector, err := NewAESGCMSecretProtector(
+				[]byte("0123456789abcdef0123456789abcdef"), SecretProtectionExternalKey,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const secret = "client-secret"
+			ciphertext, keyID, err := protector.Encrypt([]byte(secret))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.OIDCConfig{
+				Enabled: true, IssuerURL: "https://identity.example.com", ClientID: "reader", ClientSecret: secret,
+				ProviderName: "Company Login", Scopes: []string{"openid", "profile", "email"},
+				PublicURL: "https://reader.example.com", SessionAbsoluteTTL: 12 * time.Hour,
+			}
+			repository := newMemoryConfigRepository()
+			repository.record = StoredConfig{
+				Enabled: true, IssuerURL: cfg.IssuerURL, ClientID: cfg.ClientID,
+				SecretCiphertext: ciphertext, SecretKeyID: keyID, ProviderName: cfg.ProviderName,
+				Scopes: strings.Join(cfg.Scopes, " "), PublicURL: cfg.PublicURL, SessionTTLSeconds: 43200,
+				Revision: 7, VerifiedFingerprint: protocolFingerprint(cfg, "/reader", ciphertext),
+			}
+			repository.adminLinked = true
+			repository.actorHasPassword = true
+			manager, err := NewManager(context.Background(), Options{
+				Source: ConfigSourceDatabase, Repository: repository, Safety: repository,
+				Transactions: &memoryTransactionStore{}, Protector: protector, BasePath: "/reader",
+				ProviderFactory: func(cfg oidcauth.RemoteProviderConfig) (probeProvider, error) {
+					return &fakeProbeProvider{issuer: cfg.IssuerURL}, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fields := adminFieldsFromRecord(repository.record)
+			request := UpdateRequest{ExpectedRevision: repository.record.Revision, ActorUserID: "admin"}
+			tt.prepare(repository, &fields, &request)
+			request.Fields = fields
+
+			if _, err := manager.Apply(context.Background(), request); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Apply() error = %v, want %v", err, tt.wantErr)
+			}
+			if repository.record.Revision != 7 {
+				t.Fatalf("rejected Apply() changed revision to %d", repository.record.Revision)
+			}
+		})
+	}
 }
 
 func (r *memoryConfigRepository) CompleteTest(_ context.Context, expected int64, fingerprint string, at time.Time, actorUserID string, identity oidcauth.VerifiedIdentity, audit AuditEvent) (StoredConfig, error) {

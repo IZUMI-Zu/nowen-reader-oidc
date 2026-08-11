@@ -316,6 +316,48 @@ func TestEHentaiProviderSourceTagSkipsSearch(t *testing.T) {
 	}
 }
 
+// 画廊被删除或 token 失效后，作品上残留的 source: 标签不能让 EH 源变成死路。
+func TestEHentaiProviderFallsBackToTitleSearchWhenSourceGalleryIsGone(t *testing.T) {
+	searchFixture, err := os.ReadFile("testdata/ehentai_search.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiFixture, err := os.ReadFile("testdata/ehentai_gdata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var searchCalls, apiCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api.php":
+			// 第一次是 source: 标签指向的画廊，它已经不可用。
+			if apiCalls.Add(1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"gmetadata":[{"gid":424242,"token":"aaaaaaaaaa","error":"Key missing"}]}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(apiFixture)
+		default:
+			searchCalls.Add(1)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write(searchFixture)
+		}
+	}))
+	defer server.Close()
+
+	provider := newLocalEHProvider(t, server, config.EHentaiConfig{Enabled: true, Site: config.EHentaiSitePublic})
+	results, err := provider.searchWithTags(context.Background(), "Choro Sugi", "en", []string{
+		"source:https://e-hentai.org/g/424242/aaaaaaaaaa/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searchCalls.Load() != 1 || len(results) == 0 {
+		t.Fatalf("stale gallery tag blocked the title search: searches=%d results=%+v", searchCalls.Load(), results)
+	}
+}
+
 func TestEHentaiProviderRejectsUnsafeRedirect(t *testing.T) {
 	var targetCalls atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

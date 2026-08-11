@@ -249,7 +249,12 @@ func (p *ehentaiProvider) searchWithTags(ctx context.Context, query, _ string, e
 		return p.fetchGalleryMetadata(ctx, []ehGalleryRef{ref})
 	}
 	if ref, ok := galleryRefFromEHTags(existingTags); ok {
-		return p.fetchGalleryMetadata(ctx, []ehGalleryRef{ref})
+		results, err := p.fetchGalleryMetadata(ctx, []ehGalleryRef{ref})
+		// 画廊被删除或 token 失效时不能让这本书在 EH 源上永远搜不到东西，
+		// 回落到标题搜索。限流/认证一类的错误照常返回，避免再打一次站点。
+		if len(results) > 0 || (err != nil && !errors.Is(err, errEHInvalidGallery)) {
+			return results, err
+		}
 	}
 
 	refs, err := p.searchGalleryRefsWithArtist(ctx, query, artistFromEHTags(existingTags))

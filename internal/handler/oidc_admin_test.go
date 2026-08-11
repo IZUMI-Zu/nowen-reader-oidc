@@ -283,3 +283,72 @@ func TestOIDCAdminAPIRequiresAdministratorBrowserSession(t *testing.T) {
 		}
 	}
 }
+
+// Emergency recovery sets OIDC_FORCE_PASSWORD_LOGIN=true, which switches password
+// login back on without touching OIDC_DISABLE_PASSWORD_LOGIN. The admin page has to
+// keep showing the configured value, otherwise the operator cannot see which
+// environment variable still has to be changed to make the recovery permanent.
+func TestEnvironmentManagedAdminConfigReportsConfiguredPasswordLoginPolicy(t *testing.T) {
+	t.Setenv("OIDC_CONFIG_MODE", "environment")
+	t.Setenv("OIDC_ENABLED", "true")
+	t.Setenv("OIDC_ISSUER_URL", "https://identity.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "nowen-reader")
+	t.Setenv("OIDC_CLIENT_SECRET", "super-secret-value")
+	t.Setenv("PUBLIC_URL", "https://reader.example.com")
+	t.Setenv("OIDC_DISABLE_PASSWORD_LOGIN", "true")
+	t.Setenv("OIDC_FORCE_PASSWORD_LOGIN", "true")
+	t.Setenv("BASE_PATH", "/reader")
+	t.Setenv("DATA_DIR", t.TempDir())
+	if err := store.InitDB(filepath.Join(t.TempDir(), "oidc-env-admin.db")); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	t.Cleanup(store.CloseDB)
+
+	admin := &model.User{ID: "admin", Username: "admin", Password: "recovery-password-hash", Nickname: "Admin", Role: "admin"}
+	if err := store.CreateUser(admin); err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	if err := store.CreateSession(&model.UserSession{
+		ID: "admin-session", UserID: admin.ID, ExpiresAt: time.Now().Add(time.Hour),
+		AuthMethod: model.SessionAuthMethodPassword, AuthenticatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	runtime, err := NewOIDCRuntime()
+	if err != nil {
+		t.Fatalf("NewOIDCRuntime() error = %v", err)
+	}
+	adminHandler := NewOIDCAdminHandler(runtime, newAuthHandlerWithRuntime(runtime))
+	router := gin.New()
+	group := router.Group("/reader/api/admin/oidc")
+	group.Use(middleware.SessionRequired(), middleware.AdminRequired())
+	group.GET("", adminHandler.Get)
+
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/admin/oidc", nil)
+	request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "admin-session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET status = %d: %s", response.Code, response.Body.String())
+	}
+	var fetched oidcruntime.AdminConfig
+	if err := json.Unmarshal(response.Body.Bytes(), &fetched); err != nil {
+		t.Fatalf("decode admin config: %v", err)
+	}
+	if fetched.ManagedBy != oidcruntime.ConfigSourceEnvironment || fetched.Editable {
+		t.Fatalf("environment-managed config lost its read-only source: %+v", fetched)
+	}
+	if !fetched.ForcePasswordLogin {
+		t.Fatalf("recovery override was not reported to the admin page: %+v", fetched)
+	}
+	if !fetched.Config.DisablePasswordLogin {
+		t.Fatalf("environment-managed page hid OIDC_DISABLE_PASSWORD_LOGIN=true while recovery was active: %+v", fetched.Config)
+	}
+	if runtime.State().Config.DisablePasswordLogin {
+		t.Fatalf("recovery override stopped taking effect on the login path: %+v", runtime.State())
+	}
+}

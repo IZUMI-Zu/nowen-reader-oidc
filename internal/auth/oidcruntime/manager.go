@@ -683,12 +683,17 @@ func (m *Manager) adminConfigForSnapshot(snapshot *runtimeSnapshot) AdminConfig 
 	}
 	if m.source == ConfigSourceEnvironment {
 		cfg := snapshot.state.Config
+		// Report the configured policy, not the effective one: OIDC_FORCE_PASSWORD_LOGIN
+		// turns password login back on without changing OIDC_DISABLE_PASSWORD_LOGIN, and
+		// the admin still has to see which variable to edit.
+		fields := adminFieldsFromConfig(cfg)
+		fields.DisablePasswordLogin = snapshot.state.PasswordLoginPolicyDisabled
 		return AdminConfig{
 			ManagedBy: ConfigSourceEnvironment, Editable: false, Status: "environment-managed",
 			ClientSecretConfigured: cfg.ClientSecret != "", CallbackURL: cfg.CallbackURL,
 			BasePath:           m.basePath,
 			ForcePasswordLogin: m.forcePasswordLogin,
-			ErrorCode:          snapshot.state.ErrorCode, Config: adminFieldsFromConfig(cfg),
+			ErrorCode:          snapshot.state.ErrorCode, Config: fields,
 		}
 	}
 	record := snapshot.record

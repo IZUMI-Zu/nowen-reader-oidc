@@ -588,6 +588,21 @@ func GetGroupStoredCoverURL(groupID int) (string, error) {
 	return coverURL, err
 }
 
+// UpdateGroupStoredCoverURLIfCurrent replaces a stored cover URL only when it
+// still matches the value observed by the caller. This prevents a delayed
+// download task from overwriting a newer metadata update.
+func UpdateGroupStoredCoverURLIfCurrent(groupID int, currentURL, nextURL string) (bool, error) {
+	result, err := db.Exec(`
+		UPDATE "ComicGroup" SET "coverUrl" = ?, "updatedAt" = ?
+		WHERE "id" = ? AND "coverUrl" = ?
+	`, nextURL, time.Now().UTC(), groupID, currentURL)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	return updated == 1, err
+}
+
 // GroupMetadataUpdate 系列元数据更新请求。
 type GroupMetadataUpdate struct {
 	Name        *string `json:"name"`

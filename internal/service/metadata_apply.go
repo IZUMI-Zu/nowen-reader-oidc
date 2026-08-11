@@ -22,8 +22,14 @@ const maxCoverDownloadBytes = 20 << 20
 
 var errEHCoverRequest = errors.New("E-Hentai cover request failed")
 
-// 合集封面下载去重：同一 groupID 同时只有一个下载任务，其余等待结果
-var groupCoverDownload sync.Map  // groupID -> chan struct{}
+type groupCoverDownloadState struct {
+	coverURL string
+	done     chan struct{}
+}
+
+// 合集封面下载去重：同一 groupID 同时只有一个下载任务。等待者会比较
+// URL，避免旧任务完成后让新的封面更新误用旧缓存。
+var groupCoverDownload sync.Map  // groupID -> *groupCoverDownloadState
 var seriesCoverDownload sync.Map // seriesID -> chan struct{}
 
 // ============================================================
@@ -214,8 +220,19 @@ func cacheCoverAsThumbnailForSource(comicID, coverURL, metadataSource string) er
 	return nil
 }
 
-// DownloadGroupCover 保存系列封面 URL 到数据库，并下载到本地缓存。
+// DownloadGroupCover replaces the local cache for the cover URL already saved
+// on the group. Callers persist the URL before scheduling this download.
 func DownloadGroupCover(groupID int, coverURL string, metadataSources ...string) {
+	downloadGroupCover(groupID, coverURL, true, metadataSources...)
+}
+
+// EnsureGroupCoverCached downloads a missing cache without replacing a valid
+// cache produced by another request for the same URL.
+func EnsureGroupCoverCached(groupID int, coverURL string, metadataSources ...string) {
+	downloadGroupCover(groupID, coverURL, false, metadataSources...)
+}
+
+func downloadGroupCover(groupID int, coverURL string, replace bool, metadataSources ...string) {
 	if coverURL == "" {
 		return
 	}
@@ -224,58 +241,94 @@ func DownloadGroupCover(groupID int, coverURL string, metadataSources ...string)
 		log.Printf("[metadata] Group cover rejected for group %d: %v", groupID, err)
 		return
 	}
-	// Bangumi 等源可能返回 http:// URL，强制转为 https://
-	coverURL = strings.Replace(coverURL, "http://", "https://", 1)
-
-	// 保存外部 URL 到数据库
-	if err := store.UpdateGroupMetadata(groupID, store.GroupMetadataUpdate{
-		CoverURL: &coverURL,
-	}); err != nil {
-		log.Printf("[metadata] Group cover URL save failed for group %d: %v", groupID, err)
+	// Bangumi 等源可能返回 http:// URL，强制转为 https://，但只在数据库
+	// 仍保存调用方观察到的 URL 时更新，避免旧异步任务覆盖新值。
+	storedURL, err := store.GetGroupStoredCoverURL(groupID)
+	if err != nil {
 		return
 	}
-	log.Printf("[metadata] Group cover URL saved for group %d", groupID)
-
-	// 下载封面到本地缓存
-	downloadGroupCoverToLocal(groupID, coverURL, metadataSource)
+	coverURL = strings.Replace(coverURL, "http://", "https://", 1)
+	normalizedStoredURL := strings.Replace(strings.TrimSpace(storedURL), "http://", "https://", 1)
+	if normalizedStoredURL != coverURL {
+		return
+	}
+	if storedURL != coverURL {
+		updated, err := store.UpdateGroupStoredCoverURLIfCurrent(groupID, storedURL, coverURL)
+		if err != nil || !updated {
+			return
+		}
+	}
+	if !groupCoverURLIsCurrent(groupID, coverURL) {
+		// The handler has already stored a newer URL, so this asynchronous task
+		// must not restore an older cover or cache.
+		return
+	}
+	downloadGroupCoverToLocal(groupID, coverURL, metadataSource, replace)
 }
 
 // downloadGroupCoverToLocal 下载合集封面图片并保存为本地 WebP 缩略图。
 // 使用去重机制确保同一 groupID 同时只有一个下载任务。
-func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string) {
+func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string, replace bool) {
 	thumbDir := config.GetThumbnailsDir()
 	if err := os.MkdirAll(thumbDir, 0755); err != nil {
 		return
 	}
 
-	// 快速路径：磁盘缓存命中
 	cacheName := archive.GroupCoverCacheName(groupID)
 	cachePath := filepath.Join(thumbDir, cacheName)
-	if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
+	if !replace && groupCoverCacheExists(cachePath) {
 		return
 	}
 
-	// 去重：如果同一 groupID 正在下载，等待其完成后重新检查缓存
-	ch, loaded := groupCoverDownload.LoadOrStore(groupID, make(chan struct{}, 1))
-	done := ch.(chan struct{})
-	if loaded {
-		// 其他 goroutine 正在下载，等待完成
-		<-done
-		// 重新检查缓存是否被成功写入
-		if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-			return
+	for {
+		state := &groupCoverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+		activeValue, loaded := groupCoverDownload.LoadOrStore(groupID, state)
+		if loaded {
+			active := activeValue.(*groupCoverDownloadState)
+			<-active.done
+			if active.coverURL == coverURL && groupCoverCacheExists(cachePath) {
+				return
+			}
+			// A different URL finished. Acquire the next slot so this request can
+			// replace it, unless the database says this request is now stale.
+			if !groupCoverURLIsCurrent(groupID, coverURL) {
+				return
+			}
+			continue
 		}
-		// 下载失败，等待下次请求时重新尝试
+
+		func() {
+			defer func() {
+				close(state.done)
+				groupCoverDownload.Delete(groupID)
+			}()
+			if !groupCoverURLIsCurrent(groupID, coverURL) {
+				return
+			}
+			if !replace && groupCoverCacheExists(cachePath) {
+				return
+			}
+			if replace {
+				archive.ClearGroupCoverCache(groupID)
+			}
+			downloadGroupCoverToLocalInternal(groupID, coverURL, metadataSource, thumbDir, cachePath)
+		}()
 		return
 	}
+}
 
-	// 当前 goroutine 负责下载，完成后通知等待者
-	defer func() {
-		close(done)
-		groupCoverDownload.Delete(groupID)
-	}()
+func groupCoverCacheExists(cachePath string) bool {
+	data, err := os.ReadFile(cachePath)
+	return err == nil && len(data) > 0
+}
 
-	downloadGroupCoverToLocalInternal(groupID, coverURL, metadataSource, thumbDir, cachePath)
+func groupCoverURLIsCurrent(groupID int, coverURL string) bool {
+	storedURL, err := store.GetGroupStoredCoverURL(groupID)
+	if err != nil {
+		return false
+	}
+	storedURL = strings.Replace(strings.TrimSpace(storedURL), "http://", "https://", 1)
+	return storedURL == coverURL
 }
 
 // downloadGroupCoverToLocalInternal 执行实际的封面下载和保存逻辑。
@@ -306,6 +359,10 @@ func downloadGroupCoverToLocalInternal(groupID int, coverURL, metadataSource, th
 	if err != nil {
 		// Fallback: 保存原始图片数据
 		log.Printf("[metadata] Group cover cache failed for group %d: %v", groupID, err)
+		return
+	}
+	if !groupCoverURLIsCurrent(groupID, coverURL) {
+		// A newer handler update won while this request was in flight.
 		return
 	}
 	archive.ClearGroupCoverCache(groupID)

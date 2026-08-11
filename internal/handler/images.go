@@ -366,7 +366,7 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 	if err == nil && rawCoverURL != "" {
 		switch {
 		case strings.HasPrefix(rawCoverURL, "http://") || strings.HasPrefix(rawCoverURL, "https://"):
-			go service.DownloadGroupCover(groupID, rawCoverURL)
+			go service.EnsureGroupCoverCached(groupID, rawCoverURL)
 			c.Redirect(http.StatusTemporaryRedirect, rawCoverURL)
 			return
 		case strings.HasPrefix(rawCoverURL, "data:image/"):

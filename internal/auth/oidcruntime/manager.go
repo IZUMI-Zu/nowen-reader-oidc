@@ -103,9 +103,6 @@ func NewManager(ctx context.Context, options Options) (*Manager, error) {
 	var snapshot *runtimeSnapshot
 	if options.Source == ConfigSourceEnvironment {
 		cfg := cloneConfig(options.EnvironmentConfig)
-		if manager.forcePasswordLogin {
-			cfg.DisablePasswordLogin = false
-		}
 		record := storedFromConfig(cfg)
 		secretVersion, err := opaqueFingerprintToken()
 		if err != nil {
@@ -522,10 +519,17 @@ func adminFailureCode(err error) string {
 }
 
 func (m *Manager) buildSnapshot(cfg config.OIDCConfig, record StoredConfig, configErr error, buildProvider bool) *runtimeSnapshot {
+	passwordLoginPolicyDisabled := cfg.DisablePasswordLogin
+	if m.source == ConfigSourceDatabase {
+		passwordLoginPolicyDisabled = record.DisablePasswordLogin
+	}
 	if m.forcePasswordLogin {
 		cfg.DisablePasswordLogin = false
 	}
-	snapshot := &runtimeSnapshot{record: record, state: State{Config: cloneConfig(cfg), Source: m.source}}
+	snapshot := &runtimeSnapshot{record: record, state: State{
+		Config: cloneConfig(cfg), Source: m.source,
+		PasswordLoginPolicyDisabled: passwordLoginPolicyDisabled,
+	}}
 	if configErr != nil {
 		snapshot.state.ErrorCode = configErrorCode(configErr)
 		m.enablePasswordRecoveryForDatabaseError(snapshot)

@@ -632,10 +632,18 @@ func (h *AuthHandler) DeleteUserHandler(c *gin.Context) {
 }
 
 func protectedOIDCAdminIssuer(state oidcruntime.State) string {
-	if state.Config.DisablePasswordLogin {
+	if passwordLoginDisabledByPolicy(state) {
 		return state.Config.IssuerURL
 	}
 	return ""
+}
+
+func passwordLoginDisabledByPolicy(state oidcruntime.State) bool {
+	// Config is the effective runtime policy and can be opened temporarily by
+	// the deployment recovery switch or an invalid database configuration.
+	// Destructive identity changes must still preserve the persisted lockout
+	// invariant for when that temporary recovery condition is removed.
+	return state.PasswordLoginPolicyDisabled || state.Config.DisablePasswordLogin
 }
 
 // CreateUserByAdmin handles POST /api/auth/users (admin only)

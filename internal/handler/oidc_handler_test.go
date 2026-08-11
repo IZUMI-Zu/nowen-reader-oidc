@@ -731,7 +731,7 @@ func TestOIDCUnlinkUsesLeasedPolicySnapshot(t *testing.T) {
 	createSessionForOIDCTest(t, "recent-session", "local-admin", model.SessionAuthMethodPassword, time.Now().UTC())
 	visible := oidcruntime.State{Config: config.OIDCConfig{Enabled: true, IssuerURL: identity.Issuer}}
 	leased := visible
-	leased.Config.DisablePasswordLogin = true
+	leased.PasswordLoginPolicyDisabled = true
 	runtime := &fakeHandlerOIDCRuntime{
 		fakeOIDCService: &fakeOIDCService{}, state: visible, leaseState: &leased,
 	}
@@ -778,8 +778,8 @@ func TestUserManagementCannotRemoveLastBoundOIDCAdministrator(t *testing.T) {
 	runtime := &fakeHandlerOIDCRuntime{
 		fakeOIDCService: &fakeOIDCService{},
 		state: oidcruntime.State{Config: config.OIDCConfig{
-			Enabled: true, IssuerURL: issuer, DisablePasswordLogin: true,
-		}},
+			Enabled: true, IssuerURL: issuer, DisablePasswordLogin: false,
+		}, PasswordLoginPolicyDisabled: true},
 	}
 	router := gin.New()
 	handler := newAuthHandlerWithRuntime(runtime)

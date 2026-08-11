@@ -134,8 +134,8 @@ func TestInvalidDatabaseConfigurationReopensPasswordLoginOnStartup(t *testing.T)
 	if state.Ready || state.ErrorCode == "" {
 		t.Fatalf("invalid database configuration was treated as ready: %+v", state)
 	}
-	if state.Config.DisablePasswordLogin {
-		t.Fatalf("invalid database configuration kept password login disabled: %+v", state)
+	if state.Config.DisablePasswordLogin || !state.PasswordLoginPolicyDisabled {
+		t.Fatalf("invalid database configuration lost effective recovery or persisted policy: %+v", state)
 	}
 }
 
@@ -167,8 +167,28 @@ func TestUnavailableDatabaseProviderReopensPasswordLoginOnStartup(t *testing.T) 
 	if state.Ready || state.ErrorCode == "" {
 		t.Fatalf("unavailable database provider was treated as ready: %+v", state)
 	}
-	if state.Config.DisablePasswordLogin {
-		t.Fatalf("unavailable database provider kept password login disabled: %+v", state)
+	if state.Config.DisablePasswordLogin || !state.PasswordLoginPolicyDisabled {
+		t.Fatalf("unavailable database provider lost effective recovery or persisted policy: %+v", state)
+	}
+}
+
+func TestForcePasswordLoginPreservesManagedLockoutPolicy(t *testing.T) {
+	manager, err := NewManager(context.Background(), Options{
+		Source: ConfigSourceEnvironment,
+		EnvironmentConfig: config.OIDCConfig{
+			Enabled: true, DisablePasswordLogin: true,
+			IssuerURL: "https://identity.example.com", ClientID: "client", ClientSecret: "secret",
+			ProviderName: "Company Login", Scopes: []string{"openid"}, PublicURL: "https://reader.example.com",
+			SessionAbsoluteTTL: 12 * time.Hour,
+		},
+		Transactions: &memoryTransactionStore{}, BasePath: "/reader", ForcePasswordLogin: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := manager.State()
+	if state.Config.DisablePasswordLogin || !state.PasswordLoginPolicyDisabled {
+		t.Fatalf("recovery override lost effective recovery or managed policy: %+v", state)
 	}
 }
 

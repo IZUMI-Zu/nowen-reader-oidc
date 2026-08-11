@@ -108,6 +108,9 @@ type State struct {
 	Available bool
 	Ready     bool
 	ErrorCode string
+	// PasswordLoginPolicyDisabled preserves the managed policy before a
+	// deployment or database-error recovery override opens the login route.
+	PasswordLoginPolicyDisabled bool
 }
 
 type AdminConfig struct {

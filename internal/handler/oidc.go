@@ -30,6 +30,7 @@ func newAuthHandlerWithOIDC(cfg config.OIDCConfig, service oidcLoginService, err
 	state := oidcruntime.State{
 		Config: cfg, Source: oidcruntime.ConfigSourceEnvironment,
 		Available: service != nil && err == nil, Ready: cfg.Enabled && service != nil && err == nil,
+		PasswordLoginPolicyDisabled: cfg.DisablePasswordLogin,
 	}
 	if err != nil {
 		state.ErrorCode = "configuration_invalid"
@@ -353,14 +354,16 @@ func (h *AuthHandler) OIDCUnlink(c *gin.Context) {
 		return
 	}
 	var oidcConfig config.OIDCConfig
+	var passwordLoginPolicyDisabled bool
 	err := h.oidc.WithStateLease(func(state oidcruntime.State) error {
 		oidcConfig = state.Config
-		return store.UnlinkOIDCIdentity(c.Request.Context(), user.ID, oidcConfig.IssuerURL, !oidcConfig.DisablePasswordLogin)
+		passwordLoginPolicyDisabled = passwordLoginDisabledByPolicy(state)
+		return store.UnlinkOIDCIdentity(c.Request.Context(), user.ID, oidcConfig.IssuerURL, !passwordLoginPolicyDisabled)
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrOIDCWouldLockOut) {
 			message := "Set a local password before unlinking the last external login"
-			if oidcConfig.DisablePasswordLogin {
+			if passwordLoginPolicyDisabled {
 				message = "Enable password login before unlinking the last external login"
 			}
 			c.JSON(http.StatusConflict, gin.H{"error": message})

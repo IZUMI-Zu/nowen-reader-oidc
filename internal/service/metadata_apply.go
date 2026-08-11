@@ -234,6 +234,14 @@ func DownloadGroupCover(groupID int, coverURL string, metadataSources ...string)
 	downloadGroupCover(groupID, coverURL, true, metadataSources...)
 }
 
+// ScheduleGroupCoverRefresh invalidates the prior browser-visible cache before
+// returning, then refreshes it asynchronously. Handlers should call this only
+// after the new cover URL has been committed to the database.
+func ScheduleGroupCoverRefresh(groupID int, coverURL string, metadataSources ...string) {
+	ClearGroupCoverCache(groupID)
+	go DownloadGroupCover(groupID, coverURL, metadataSources...)
+}
+
 // EnsureGroupCoverCached downloads a missing cache without replacing a valid
 // cache produced by another request for the same URL.
 func EnsureGroupCoverCached(groupID int, coverURL string, metadataSources ...string) {

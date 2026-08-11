@@ -234,6 +234,9 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用元数据失败"})
 		return
 	}
+	if update.CoverURL != nil {
+		service.ScheduleGroupCoverRefresh(id, *update.CoverURL, meta.Source)
+	}
 	if applyTags && body.SyncTags && allowMemberSync {
 		total, synced, _, err := store.SyncGroupTagsToVolumes(id)
 		if err != nil || synced != total {
@@ -244,11 +247,6 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 			})
 			return
 		}
-	}
-
-	// 下载封面
-	if meta.CoverURL != "" && shouldApply("cover") {
-		go service.DownloadGroupCover(id, meta.CoverURL, meta.Source)
 	}
 
 	// 同步元数据到所有卷

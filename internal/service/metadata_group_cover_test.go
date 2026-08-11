@@ -248,6 +248,67 @@ func TestGroupCoverDataURLWinsAfterCheckedRemotePublish(t *testing.T) {
 	}
 }
 
+func TestScheduleGroupCoverRefreshClearsOldCacheBeforeReturning(t *testing.T) {
+	const groupID = 906
+	const coverURL = "https://ul.ehgt.org/new.png"
+	setupGroupCoverTest(t, groupID, coverURL)
+	imageB := solidPNG(t, color.RGBA{B: 255, A: 255})
+	stubGroupCoverTransport(t, func(req *http.Request) (*http.Response, error) {
+		return imageResponse(req, imageB), nil
+	})
+
+	thumbDir := config.GetThumbnailsDir()
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(thumbDir, archive.GroupCoverCacheName(groupID))
+	if err := os.WriteFile(cachePath, []byte("old cached cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the asynchronous worker before its own invalidation. This makes the
+	// assertion below prove that ScheduleGroupCoverRefresh itself clears the old
+	// cache synchronously instead of winning through goroutine scheduling.
+	blocked := &groupCoverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+	groupCoverDownload.Store(groupID, blocked)
+	published := make(chan struct{})
+	groupCoverBeforePublish = func(id int) {
+		if id == groupID {
+			close(published)
+		}
+	}
+	t.Cleanup(func() {
+		groupCoverBeforePublish = nil
+		groupCoverDownload.Delete(groupID)
+	})
+
+	ScheduleGroupCoverRefresh(groupID, coverURL, config.EHentaiSitePublic)
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("old cache still existed when refresh scheduling returned: %v", err)
+	}
+
+	groupCoverDownload.Delete(groupID)
+	close(blocked.done)
+	select {
+	case <-published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduled cover refresh did not resume")
+	}
+	waitGroupCoverDownloadIdle(t, groupID)
+}
+
+func waitGroupCoverDownloadIdle(t *testing.T, groupID int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, active := groupCoverDownload.Load(groupID); !active {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("group cover download %d did not finish", groupID)
+}
+
 func waitGroupCoverTestTask(t *testing.T, name string, done <-chan struct{}) {
 	t.Helper()
 	select {

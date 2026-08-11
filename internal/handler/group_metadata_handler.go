@@ -46,7 +46,7 @@ func (h *GroupHandler) UpdateMetadata(c *gin.Context) {
 		case coverURL == "":
 			service.ClearGroupCoverCache(id)
 		case strings.HasPrefix(coverURL, "http://") || strings.HasPrefix(coverURL, "https://"):
-			go service.DownloadGroupCover(id, coverURL)
+			service.ScheduleGroupCoverRefresh(id, coverURL)
 		case strings.HasPrefix(coverURL, "data:image/"):
 			if err := service.CacheGroupCoverDataURL(id, coverURL); err != nil {
 				log.Printf("[API] UpdateMetadata: cache group cover failed: %v", err)

@@ -253,7 +253,7 @@ func GetAllGroupsWithOptions(opts GroupListOptions) ([]ComicGroupWithCount, erro
 		g.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 		// 封面 URL：优先自定义封面，否则使用第一个可见目录作品或散本的封面。
 		if g.CoverURL != "" {
-			g.CoverURL = BuildGroupCoverURL(g.ID)
+			g.CoverURL = BuildGroupCoverURL(g.ID, g.CoverURL, updatedAt)
 		} else if g.ComicCount > 0 {
 			var firstComicID string
 			coverVisibility, coverArgs := visibility("c_cover")
@@ -473,7 +473,7 @@ func GetGroupByIDWithOptions(groupID int, opts GroupDetailOptions) (*ComicGroupD
 
 	// 封面 URL：有自定义封面时返回本地缓存路径，无封面时按优先使用 Series 目录作品或第一本漫画缩略图
 	if g.CoverURL != "" {
-		g.CoverURL = BuildGroupCoverURL(g.ID)
+		g.CoverURL = BuildGroupCoverURL(g.ID, g.CoverURL, updatedAt)
 	} else if len(g.SeriesList) > 0 && g.SeriesList[0].CoverURL != "" {
 		g.CoverURL = g.SeriesList[0].CoverURL
 	} else if len(g.Comics) > 0 {

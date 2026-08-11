@@ -350,6 +350,9 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 				results = append(results, result)
 				continue
 			}
+			if update.CoverURL != nil {
+				service.ScheduleGroupCoverRefresh(gid, *update.CoverURL, bestMatch.Source)
+			}
 			if applyTags && body.SyncTags && allowMemberSync {
 				total, synced, _, err := store.SyncGroupTagsToVolumes(gid)
 				if err != nil || synced != total {
@@ -358,11 +361,6 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 					results = append(results, result)
 					continue
 				}
-			}
-
-			// 下载封面
-			if bestMatch.CoverURL != "" && shouldApply("cover") {
-				go service.DownloadGroupCover(gid, bestMatch.CoverURL, bestMatch.Source)
 			}
 
 			// 同步到所有卷

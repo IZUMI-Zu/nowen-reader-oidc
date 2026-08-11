@@ -204,7 +204,7 @@ func (h *GroupHandler) UpdateGroup(c *gin.Context) {
 
 	// 如果提供了外部封面 URL，触发异步下载到本地缓存
 	if body.CoverURL != "" && (strings.HasPrefix(body.CoverURL, "http://") || strings.HasPrefix(body.CoverURL, "https://")) {
-		go service.DownloadGroupCover(id, body.CoverURL)
+		service.ScheduleGroupCoverRefresh(id, body.CoverURL)
 	}
 
 	// 如果有元数据字段，也一并更新

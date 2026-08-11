@@ -17,6 +17,7 @@ import (
 
 	"github.com/nowen-reader/nowen-reader/internal/archive"
 	"github.com/nowen-reader/nowen-reader/internal/config"
+	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/model"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
@@ -180,8 +181,100 @@ func TestNonEHGroupCoverRedirectSuppressesReferrer(t *testing.T) {
 	if response.Code != http.StatusTemporaryRedirect || response.Header().Get("Location") != coverURL {
 		t.Fatalf("non-EH redirect = %d %q", response.Code, response.Header().Get("Location"))
 	}
+	if cacheControl := response.Header().Get("Cache-Control"); cacheControl != "private, no-store" {
+		t.Fatalf("non-EH redirect cache control = %q", cacheControl)
+	}
 	if policy := response.Header().Get("Referrer-Policy"); policy != "no-referrer" {
 		t.Fatalf("non-EH redirect referrer policy = %q", policy)
+	}
+}
+
+func TestGroupCoverRejectsUserWithoutMemberLibraryAccess(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	router := setupTestRouter(t)
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := registerAndLogin(t, router)
+	createUser := performAuthedRequest(router, http.MethodPost, "/api/auth/users", map[string]any{
+		"username": "cover-reader", "password": "readerpass", "nickname": "Cover Reader", "role": "user",
+	}, adminCookie)
+	if createUser.Code != http.StatusOK {
+		t.Fatalf("create reader: %d %s", createUser.Code, createUser.Body.String())
+	}
+	login := performRequest(router, http.MethodPost, "/api/auth/login", map[string]string{
+		"username": "cover-reader", "password": "readerpass",
+	})
+	readerCookie := ""
+	for _, cookie := range login.Result().Cookies() {
+		if cookie.Name == middleware.SessionCookie {
+			readerCookie = cookie.Value
+		}
+	}
+	if readerCookie == "" {
+		t.Fatalf("reader login failed: %d %s", login.Code, login.Body.String())
+	}
+
+	library := &model.Library{
+		ID:            "private-group-cover-library",
+		Name:          "Private covers",
+		Type:          "comic",
+		RootPath:      t.TempDir(),
+		Enabled:       true,
+		DefaultAccess: "private",
+		ScanEnabled:   true,
+	}
+	if err := store.CreateLibrary(library); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+		INSERT INTO "Comic" ("id", "filename", "title", "type", "libraryId", "relativePath")
+		VALUES ('private-group-cover-comic', 'private.cbz', 'Private member', 'comic', ?, 'private.cbz')
+	`, library.ID); err != nil {
+		t.Fatal(err)
+	}
+	groupID64, err := store.CreateGroupWithItems("Private cover group", "", []string{"private-group-cover-comic"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := int(groupID64)
+	coverURL := "https://ul.ehgt.org/g/private.png"
+	if err := store.UpdateGroupMetadata(groupID, store.GroupMetadataUpdate{CoverURL: &coverURL}); err != nil {
+		t.Fatal(err)
+	}
+	thumbDir := config.GetThumbnailsDir()
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(thumbDir, archive.GroupCoverCacheName(groupID))
+	if err := os.WriteFile(cachePath, handlerSolidPNG(t, color.RGBA{R: 120, B: 120, A: 255}), 0644); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/comics/group_" + strconv.Itoa(groupID) + "/thumbnail"
+	adminResponse := performAuthedRequest(router, http.MethodGet, path, nil, adminCookie)
+	if adminResponse.Code != http.StatusOK {
+		t.Fatalf("admin group cover status = %d", adminResponse.Code)
+	}
+	if cacheControl := adminResponse.Header().Get("Cache-Control"); !strings.HasPrefix(cacheControl, "private,") {
+		t.Fatalf("admin group cover cache control = %q", cacheControl)
+	}
+	readerResponse := performAuthedRequest(router, http.MethodGet, path, nil, readerCookie)
+	if readerResponse.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized reader group cover status = %d, want 403", readerResponse.Code)
+	}
+	reader, err := store.GetUserByUsername("cover-reader")
+	if err != nil || reader == nil {
+		t.Fatalf("load reader: %#v, %v", reader, err)
+	}
+	if err := store.SetUserLibraryAccess(reader.ID, []store.LibraryAccessReq{{LibraryID: library.ID, CanView: true}}); err != nil {
+		t.Fatal(err)
+	}
+	allowedResponse := performAuthedRequest(router, http.MethodGet, path, nil, readerCookie)
+	if allowedResponse.Code != http.StatusOK {
+		t.Fatalf("authorized reader group cover status = %d", allowedResponse.Code)
+	}
+	if cacheControl := allowedResponse.Header().Get("Cache-Control"); !strings.HasPrefix(cacheControl, "private,") {
+		t.Fatalf("authorized reader group cover cache control = %q", cacheControl)
 	}
 }
 

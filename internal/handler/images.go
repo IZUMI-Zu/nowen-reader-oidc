@@ -332,9 +332,8 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 		return
 	}
 
-	group, err := store.GetGroupByID(groupID)
-	if err != nil || group == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "合集不存在"})
+	group, ok := visibleGroupForCover(c, groupID)
+	if !ok {
 		return
 	}
 
@@ -357,6 +356,7 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 				return
 			}
 			go service.EnsureGroupCoverCached(groupID, rawCoverURL)
+			setPrivateMetadataCoverRedirect(c)
 			c.Header("Referrer-Policy", "no-referrer")
 			c.Redirect(http.StatusTemporaryRedirect, rawCoverURL)
 			return
@@ -370,6 +370,7 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 	}
 
 	if group.CoverURL != "" && !strings.HasPrefix(group.CoverURL, "/api/comics/group_") {
+		setPrivateMetadataCoverRedirect(c)
 		c.Redirect(http.StatusTemporaryRedirect, group.CoverURL)
 		return
 	}
@@ -378,6 +379,7 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 	if len(group.Comics) > 0 {
 		firstCover := group.Comics[0].CoverURL
 		if firstCover != "" {
+			setPrivateMetadataCoverRedirect(c)
 			c.Redirect(http.StatusTemporaryRedirect, firstCover)
 			return
 		}
@@ -414,11 +416,13 @@ func (h *ImageHandler) serveSeriesCoverThumbnail(c *gin.Context, seriesID string
 			return
 		}
 		go service.DownloadSeriesCover(seriesID, rawCoverURL)
+		setPrivateMetadataCoverRedirect(c)
 		c.Header("Referrer-Policy", "no-referrer")
 		c.Redirect(http.StatusTemporaryRedirect, rawCoverURL)
 		return
 	}
 	if detail.Series.CoverComicID != "" {
+		setPrivateMetadataCoverRedirect(c)
 		c.Redirect(http.StatusTemporaryRedirect, store.BuildComicCoverURL(detail.Series.CoverComicID))
 		return
 	}
@@ -437,6 +441,8 @@ func serveCachedMetadataCover(c *gin.Context, cachePath string) bool {
 			strconv.FormatInt(stat.Size(), 36),
 		)
 	}
+	c.Header("Cache-Control", "private, max-age=300, must-revalidate")
+	c.Header("Vary", "Authorization, Cookie")
 	if c.GetHeader("If-None-Match") == etag {
 		c.Header("ETag", etag)
 		c.Status(http.StatusNotModified)
@@ -444,11 +450,52 @@ func serveCachedMetadataCover(c *gin.Context, cachePath string) bool {
 	}
 	contentType := http.DetectContentType(data)
 	c.Header("Content-Type", contentType)
-	c.Header("Cache-Control", "public, max-age=300, must-revalidate")
 	c.Header("Content-Length", strconv.Itoa(len(data)))
 	c.Header("ETag", etag)
 	c.Data(http.StatusOK, contentType, data)
 	return true
+}
+
+func visibleGroupForCover(c *gin.Context, groupID int) (*store.ComicGroupDetail, bool) {
+	uid := getUserID(c)
+	options := store.GroupDetailOptions{UserID: uid}
+	user, err := store.GetUserByID(uid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取用户权限失败"})
+		return nil, false
+	}
+	if user == nil || user.Role != "admin" {
+		options.FilterLibraryIDs = true
+		options.LibraryIDs, err = store.GetUserAccessibleLibraryIDs(uid)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取书库权限失败"})
+			return nil, false
+		}
+		if len(options.LibraryIDs) == 0 {
+			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
+			return nil, false
+		}
+	}
+
+	group, err := store.GetGroupByIDWithOptions(groupID, options)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取合集详情失败"})
+		return nil, false
+	}
+	if group == nil || (options.FilterLibraryIDs && group.ComicCount == 0) {
+		if options.FilterLibraryIDs {
+			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
+		} else {
+			c.JSON(http.StatusNotFound, gin.H{"error": "合集不存在"})
+		}
+		return nil, false
+	}
+	return group, true
+}
+
+func setPrivateMetadataCoverRedirect(c *gin.Context) {
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("Vary", "Authorization, Cookie")
 }
 
 // ============================================================

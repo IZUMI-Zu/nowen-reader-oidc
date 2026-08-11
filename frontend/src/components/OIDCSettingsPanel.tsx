@@ -42,6 +42,8 @@ const copy = {
     loadFailed: "加载 OIDC 配置失败",
     environmentTitle: "当前由环境变量管理",
     environmentDescription: "Web 后台为只读，避免环境变量与数据库配置混用。请在部署环境中修改后重启服务。",
+    environmentVariables: "部署配置：设置 OIDC_CONFIG_MODE=environment，并修改 OIDC_ENABLED、OIDC_ISSUER_URL、OIDC_CLIENT_ID、OIDC_DISPLAY_NAME、PUBLIC_URL、OIDC_SCOPES、OIDC_AUTO_PROVISION、OIDC_SESSION_MAX_AGE 和 OIDC_DISABLE_PASSWORD_LOGIN。",
+    environmentSecret: "Client Secret 只设置一种来源：OIDC_CLIENT_SECRET 或 OIDC_CLIENT_SECRET_FILE。请限制部署配置或挂载 secret file 的读取权限。",
     recoveryTitle: "防止管理员被锁在系统外",
     recoveryDescription: "启用前必须用当前管理员完成测试登录。停用 OIDC 或关闭密码登录前，当前管理员还必须保留本地恢复密码。",
     forcePassword: "部署侧恢复开关已启用：密码登录会保持开放，Web 设置不会关闭该入口。",
@@ -115,6 +117,8 @@ const copy = {
     loadFailed: "Failed to load OIDC configuration",
     environmentTitle: "Managed by environment variables",
     environmentDescription: "The Web form is read-only so environment and database settings cannot be mixed. Change the deployment environment and restart the service.",
+    environmentVariables: "Deployment configuration: set OIDC_CONFIG_MODE=environment and edit OIDC_ENABLED, OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_DISPLAY_NAME, PUBLIC_URL, OIDC_SCOPES, OIDC_AUTO_PROVISION, OIDC_SESSION_MAX_AGE, and OIDC_DISABLE_PASSWORD_LOGIN.",
+    environmentSecret: "Configure exactly one Client Secret source: OIDC_CLIENT_SECRET or OIDC_CLIENT_SECRET_FILE. Restrict read access to the deployment configuration or mounted secret file.",
     recoveryTitle: "Administrator lockout protection",
     recoveryDescription: "The current administrator must complete a test login before activation. A local recovery password is also required before OIDC or password login can be disabled.",
     forcePassword: "The deployment recovery switch is active. Password login remains available regardless of the Web setting.",
@@ -428,12 +432,20 @@ export function OIDCSettingsPanel() {
       ) : (
         <Notice icon={<ShieldCheck className="h-5 w-5" />} title={text.recoveryTitle} description={text.recoveryDescription} tone="accent" />
       )}
-      {editable ? (
-        <div className="space-y-1 rounded-xl border border-border/60 bg-background p-3 text-xs text-muted">
-          <p>{text.recoveryCommand}</p>
-          <p>{text.keyAndLogs}</p>
-        </div>
-      ) : null}
+      <div className="space-y-1 rounded-xl border border-border/60 bg-background p-3 text-xs text-muted">
+        {editable ? (
+          <>
+            <p>{text.recoveryCommand}</p>
+            <p>{text.keyAndLogs}</p>
+          </>
+        ) : (
+          <>
+            <p>{text.environmentVariables}</p>
+            <p>{text.environmentSecret}</p>
+            <p>{text.recoveryCommand}</p>
+          </>
+        )}
+      </div>
       {serverConfig.forcePasswordLogin ? (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-300">{text.forcePassword}</div>
       ) : null}

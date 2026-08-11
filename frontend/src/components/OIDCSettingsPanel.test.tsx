@@ -94,6 +94,9 @@ describe("OIDCSettingsPanel", () => {
     render(<OIDCSettingsPanel />);
 
     await screen.findByText("Managed by environment variables");
+    screen.getByText(/OIDC_CONFIG_MODE=environment/);
+    screen.getByText(/OIDC_CLIENT_SECRET.*OIDC_CLIENT_SECRET_FILE/);
+    screen.getByText(/OIDC_FORCE_PASSWORD_LOGIN=true/);
     expect((screen.getByLabelText("Issuer URL") as HTMLInputElement).disabled).toBe(true);
     const secretInput = screen.getByPlaceholderText("Enter a new Client Secret") as HTMLInputElement;
     expect(secretInput.disabled).toBe(true);

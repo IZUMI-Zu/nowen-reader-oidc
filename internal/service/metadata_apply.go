@@ -484,8 +484,9 @@ func DownloadSeriesCover(seriesID, coverURL string, metadataSources ...string) {
 		return
 	}
 	coverURL = strings.Replace(coverURL, "http://", "https://", 1)
-	if err := store.UpdateSeriesMetadata(seriesID, store.SeriesMetadataUpdate{CoverURL: &coverURL}); err != nil {
-		log.Printf("[metadata] Series cover URL save failed for %s: %v", seriesID, err)
+	// 调用方在调度下载前已经把封面 URL 写库，这里只负责缓存。数据库里已经不是
+	// 这个 URL 时说明有更新的封面赢了，旧任务不能把它改回去。
+	if !seriesCoverURLIsCurrent(seriesID, coverURL) {
 		return
 	}
 

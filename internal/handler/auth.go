@@ -43,9 +43,10 @@ type oidcRuntime interface {
 
 const passwordLoginDisabledCode = "password_login_disabled"
 const minimumPasswordLength = 6
+const maximumPasswordBytes = 72
 
-func passwordHasMinimumLength(password string) bool {
-	return utf8.RuneCountInString(password) >= minimumPasswordLength
+func passwordMeetsLengthRequirements(password string) bool {
+	return utf8.RuneCountInString(password) >= minimumPasswordLength && len(password) <= maximumPasswordBytes
 }
 
 func NewAuthHandler() *AuthHandler {
@@ -123,8 +124,8 @@ func (h *AuthHandler) registerWithState(c *gin.Context, state oidcruntime.State)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if !passwordHasMinimumLength(req.Password) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
+	if !passwordMeetsLengthRequirements(req.Password) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters and at most 72 bytes"})
 		return
 	}
 
@@ -326,8 +327,8 @@ func (h *AuthHandler) SetInitialPassword(c *gin.Context) {
 	var req struct {
 		NewPassword string `json:"newPassword"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || !passwordHasMinimumLength(req.NewPassword) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters"})
+	if err := c.ShouldBindJSON(&req); err != nil || !passwordMeetsLengthRequirements(req.NewPassword) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters and at most 72 bytes"})
 		return
 	}
 	currentUser := middleware.GetCurrentUser(c)
@@ -471,8 +472,8 @@ func (h *AuthHandler) UpdateUser(c *gin.Context) {
 
 	switch req.Action {
 	case "changePassword":
-		if !passwordHasMinimumLength(req.NewPassword) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters"})
+		if !passwordMeetsLengthRequirements(req.NewPassword) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters and at most 72 bytes"})
 			return
 		}
 		targetID := req.UserID
@@ -665,8 +666,8 @@ func (h *AuthHandler) CreateUserByAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if !passwordHasMinimumLength(req.Password) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
+	if !passwordMeetsLengthRequirements(req.Password) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters and at most 72 bytes"})
 		return
 	}
 

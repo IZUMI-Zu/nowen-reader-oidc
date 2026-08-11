@@ -924,3 +924,56 @@ func TestPasswordChangeRejectsUnusableBreakGlassPassword(t *testing.T) {
 		t.Fatalf("rejected password change altered the recovery credential: user=%+v err=%v", user, err)
 	}
 }
+
+func TestForcePasswordLoginRecoversProductionRoutesFromInvalidEnvironmentOIDC(t *testing.T) {
+	setInvalidFailClosedOIDCEnvironment := func(t *testing.T, forcePasswordLogin string) {
+		t.Helper()
+		t.Setenv("OIDC_CONFIG_MODE", "environment")
+		t.Setenv("OIDC_ENABLED", "true")
+		t.Setenv("OIDC_DISABLE_PASSWORD_LOGIN", "true")
+		t.Setenv("OIDC_FORCE_PASSWORD_LOGIN", forcePasswordLogin)
+		t.Setenv("OIDC_ISSUER_URL", "https://identity.example.com")
+		t.Setenv("OIDC_CLIENT_ID", "reader")
+		t.Setenv("OIDC_CLIENT_SECRET", "")
+		t.Setenv("OIDC_CLIENT_SECRET_FILE", "")
+		t.Setenv("PUBLIC_URL", "https://reader.example.com")
+		t.Setenv("BASE_PATH", "")
+	}
+
+	t.Run("invalid environment remains fail closed without recovery switch", func(t *testing.T) {
+		setInvalidFailClosedOIDCEnvironment(t, "false")
+		router := setupTestRouter(t)
+		response := performRequest(router, http.MethodPost, "/api/auth/register", map[string]string{
+			"username": "admin", "password": "password123",
+		})
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), passwordLoginDisabledCode) {
+			t.Fatalf("fail-closed registration = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("recovery switch enables real password registration and login", func(t *testing.T) {
+		setInvalidFailClosedOIDCEnvironment(t, "true")
+		router := setupTestRouter(t)
+		registered := performRequest(router, http.MethodPost, "/api/auth/register", map[string]string{
+			"username": "admin", "password": "password123",
+		})
+		if registered.Code != http.StatusOK {
+			t.Fatalf("recovery registration = %d: %s", registered.Code, registered.Body.String())
+		}
+		login := performRequest(router, http.MethodPost, "/api/auth/login", map[string]string{
+			"username": "admin", "password": "password123",
+		})
+		if login.Code != http.StatusOK {
+			t.Fatalf("recovery login = %d: %s", login.Code, login.Body.String())
+		}
+		var sessionCookie *http.Cookie
+		for _, cookie := range login.Result().Cookies() {
+			if cookie.Name == middleware.SessionCookie && cookie.Value != "" {
+				sessionCookie = cookie
+			}
+		}
+		if sessionCookie == nil {
+			t.Fatalf("recovery login did not issue a browser session: %#v", login.Result().Cookies())
+		}
+	})
+}

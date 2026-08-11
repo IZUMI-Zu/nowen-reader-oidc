@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   consumeOIDCResumeState,
+  oidcReauthenticationReturnTo,
   parseOIDCResumeState,
   storeOIDCResumeState,
   toOIDCAdminFields,
@@ -103,4 +104,12 @@ test("form conversion validates TTL while preserving opaque client identifiers",
     () => toOIDCAdminFields({ ...validResumeState.form, sessionTTLHours: 0.01 }, "invalid ttl"),
     /invalid ttl/,
   );
+});
+
+test("reauthentication return targets exclude browser-only fragments", () => {
+  assert.equal(oidcReauthenticationReturnTo({
+    pathname: "/reader/settings",
+    search: "?tab=authentication&oidc_admin_resume=1",
+    hash: "#danger-zone",
+  }), "/reader/settings?tab=authentication&oidc_admin_resume=1");
 });

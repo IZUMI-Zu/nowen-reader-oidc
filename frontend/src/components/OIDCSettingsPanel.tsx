@@ -25,6 +25,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useLocale } from "@/lib/i18n";
 import {
   consumeOIDCResumeState,
+  oidcReauthenticationReturnTo,
   storeOIDCResumeState,
   toOIDCAdminFields,
   toOIDCAdminForm,
@@ -301,7 +302,7 @@ export function OIDCSettingsPanel() {
     if (storeOIDCResumeState(window, resume)) {
       target.searchParams.set("oidc_admin_resume", "1");
     }
-    const returnTo = target.pathname + target.search + target.hash;
+    const returnTo = oidcReauthenticationReturnTo(target);
     window.location.assign(`${apiPath("/api/auth/oidc/reauth")}?returnTo=${encodeURIComponent(returnTo)}`);
   }, [clearSecret, clientSecret.length, confirmDisablePasswordLogin, confirmOIDCOnlyUsers, form, serverConfig, user?.hasPassword]);
 

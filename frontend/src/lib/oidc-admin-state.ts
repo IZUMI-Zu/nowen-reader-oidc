@@ -29,8 +29,18 @@ interface SessionStorageHost {
   sessionStorage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
 }
 
+interface OIDCReturnLocation {
+  pathname: string;
+  search: string;
+  hash: string;
+}
+
 const oidcResumeStorageKey = "nowen-reader:oidc-admin-resume:v1";
 const sensitiveActions = new Set<OIDCSensitiveAction>(["save", "probe", "test"]);
+
+export function oidcReauthenticationReturnTo(location: OIDCReturnLocation): string {
+  return location.pathname + location.search;
+}
 
 export function toOIDCAdminForm(config: OIDCAdminConfig): OIDCAdminForm {
   return {

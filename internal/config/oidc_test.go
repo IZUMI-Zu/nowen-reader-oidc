@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,10 +21,141 @@ func clearOIDCEnv(t *testing.T) {
 		"OIDC_AUTO_PROVISION",
 		"OIDC_BOOTSTRAP_ADMIN_SUBJECTS",
 		"OIDC_SESSION_MAX_AGE",
+		"OIDC_CONFIG_MODE",
+		"OIDC_CONFIG_KEY_FILE",
+		"OIDC_CLIENT_SECRET_FILE",
+		"OIDC_FORCE_PASSWORD_LOGIN",
 		"PUBLIC_URL",
 		"BASE_PATH",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestOIDCConfigModeUsesOneCompleteAuthority(t *testing.T) {
+	clearOIDCEnv(t)
+	if mode, err := GetOIDCConfigMode(); err != nil || mode != OIDCConfigModeDatabase {
+		t.Fatalf("default mode = %q, %v", mode, err)
+	}
+	t.Setenv("OIDC_ENABLED", "false")
+	if mode, err := GetOIDCConfigMode(); err != nil || mode != OIDCConfigModeEnvironment {
+		t.Fatalf("legacy environment mode = %q, %v", mode, err)
+	}
+	t.Setenv("OIDC_CONFIG_MODE", "database")
+	if mode, err := GetOIDCConfigMode(); err != nil || mode != OIDCConfigModeDatabase {
+		t.Fatalf("explicit database mode = %q, %v", mode, err)
+	}
+	t.Setenv("OIDC_CONFIG_MODE", "mixed")
+	if _, err := GetOIDCConfigMode(); err == nil {
+		t.Fatal("invalid source mode was accepted")
+	}
+}
+
+func TestOIDCEnvironmentClientSecretFile(t *testing.T) {
+	clearOIDCEnv(t)
+	secretFile := filepath.Join(t.TempDir(), "client-secret")
+	if err := os.WriteFile(secretFile, []byte("file-secret\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("OIDC_ENABLED", "true")
+	t.Setenv("OIDC_ISSUER_URL", "https://id.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "client")
+	t.Setenv("OIDC_CLIENT_SECRET_FILE", secretFile)
+	t.Setenv("PUBLIC_URL", "https://reader.example.com")
+	cfg, err := GetOIDCConfig()
+	if err != nil || cfg.ClientSecret != "file-secret" {
+		t.Fatalf("GetOIDCConfig() secret = %q, error = %v", cfg.ClientSecret, err)
+	}
+	t.Setenv("OIDC_CLIENT_SECRET", "duplicate")
+	if _, err := GetOIDCConfig(); err == nil || !strings.Contains(err.Error(), "only one") {
+		t.Fatalf("duplicate secret sources error = %v", err)
+	}
+}
+
+func TestOIDCForcePasswordLoginFailsSafe(t *testing.T) {
+	clearOIDCEnv(t)
+	if forced, err := GetOIDCForcePasswordLogin(); err != nil || forced {
+		t.Fatalf("default force switch = %v, %v", forced, err)
+	}
+	t.Setenv("OIDC_FORCE_PASSWORD_LOGIN", "true")
+	if forced, err := GetOIDCForcePasswordLogin(); err != nil || !forced {
+		t.Fatalf("true force switch = %v, %v", forced, err)
+	}
+	t.Setenv("OIDC_FORCE_PASSWORD_LOGIN", "tru")
+	if forced, err := GetOIDCForcePasswordLogin(); err == nil || !forced {
+		t.Fatalf("malformed force switch = %v, %v", forced, err)
+	}
+}
+
+func TestValidateOIDCConfigValidatesDisabledWebDraft(t *testing.T) {
+	draft := OIDCConfig{
+		IssuerURL: "https://identity.example.com", ClientID: "nowen-reader", ClientSecret: "secret",
+		PublicURL: "https://reader.example.com", Scopes: []string{"openid", "profile", "profile"},
+	}
+	resolved, err := ValidateOIDCConfig(draft, "/reader", true)
+	if err != nil {
+		t.Fatalf("ValidateOIDCConfig() error = %v", err)
+	}
+	if resolved.Enabled || resolved.CallbackURL != "https://reader.example.com/reader/api/auth/oidc/callback" {
+		t.Fatalf("resolved draft = %+v", resolved)
+	}
+	if got := strings.Join(resolved.Scopes, " "); got != "openid profile" {
+		t.Fatalf("Scopes = %q", got)
+	}
+
+	draft.ClientSecret = ""
+	if _, err := ValidateOIDCConfig(draft, "/reader", true); err == nil || !strings.Contains(err.Error(), "OIDC_CLIENT_SECRET") {
+		t.Fatalf("missing secret error = %v", err)
+	}
+}
+
+func TestValidateOIDCConfigRejectsInvalidPopulatedDraftFields(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  OIDCConfig
+	}{
+		{name: "insecure issuer", cfg: OIDCConfig{IssuerURL: "http://identity.example.com"}},
+		{name: "discovery document instead of issuer", cfg: OIDCConfig{IssuerURL: "https://identity.example.com/.well-known/openid-configuration"}},
+		{name: "public URL path", cfg: OIDCConfig{PublicURL: "https://reader.example.com/app"}},
+		{name: "scope item contains space", cfg: OIDCConfig{Scopes: []string{"openid", "custom scope"}}},
+		{name: "missing openid scope", cfg: OIDCConfig{Scopes: []string{"profile"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := ValidateOIDCConfig(tt.cfg, "/reader", false); err == nil {
+				t.Fatalf("invalid disabled draft was accepted: %+v", tt.cfg)
+			}
+		})
+	}
+}
+
+func TestOIDCSessionTTLSecondsRejectsOverflowBeforeDurationConversion(t *testing.T) {
+	for _, seconds := range []int64{-1, 299, 2_592_001, int64(^uint64(0) >> 1)} {
+		if _, err := OIDCSessionTTLFromSeconds(seconds); err == nil {
+			t.Fatalf("OIDCSessionTTLFromSeconds(%d) accepted invalid value", seconds)
+		}
+	}
+	for _, seconds := range []int64{0, 300, 2_592_000} {
+		if _, err := OIDCSessionTTLFromSeconds(seconds); err != nil {
+			t.Fatalf("OIDCSessionTTLFromSeconds(%d) error = %v", seconds, err)
+		}
+	}
+}
+
+func TestValidateOIDCConfigPreservesOpaqueClientSecret(t *testing.T) {
+	cfg := OIDCConfig{
+		Enabled: true, IssuerURL: "https://identity.example.com", ClientID: " client ",
+		ClientSecret: " secret with surrounding spaces ", PublicURL: "https://reader.example.com",
+	}
+	resolved, err := ValidateOIDCConfig(cfg, "/", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ClientSecret != cfg.ClientSecret {
+		t.Fatalf("ClientSecret was changed during validation: %q", resolved.ClientSecret)
+	}
+	if resolved.ClientID != cfg.ClientID {
+		t.Fatalf("ClientID was changed during validation: %q", resolved.ClientID)
 	}
 }
 

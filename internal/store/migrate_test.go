@@ -28,6 +28,70 @@ func TestRunMigrations(t *testing.T) {
 	if count != len(Migrations) {
 		t.Errorf("Expected %d migrations recorded, got %d", len(Migrations), count)
 	}
+	var sessionColumnCount int
+	if err := DB().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('OIDCLoginTransaction') WHERE name = 'sessionId'`).Scan(&sessionColumnCount); err != nil {
+		t.Fatalf("query OIDC transaction session column: %v", err)
+	}
+	if sessionColumnCount != 1 {
+		t.Fatalf("OIDC transaction session column count = %d, want 1", sessionColumnCount)
+	}
+}
+
+func TestOIDCTransactionSessionMigrationUpgradesExistingDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "oidc-session-legacy.db")
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyDB.Exec(`CREATE TABLE "OIDCLoginTransaction" (
+		"stateHash" TEXT NOT NULL PRIMARY KEY,
+		"bindingHash" TEXT NOT NULL,
+		"nonce" TEXT NOT NULL,
+		"pkceVerifier" TEXT NOT NULL,
+		"purpose" TEXT NOT NULL,
+		"sessionUserId" TEXT NOT NULL DEFAULT '',
+		"returnTo" TEXT NOT NULL,
+		"expiresAt" DATETIME NOT NULL,
+		"consumedAt" DATETIME,
+		"createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		"configRevision" INTEGER NOT NULL DEFAULT 0,
+		"configFingerprint" TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyDB.Exec(`CREATE TABLE "_migrations" (
+		"version" INTEGER NOT NULL PRIMARY KEY,
+		"description" TEXT NOT NULL DEFAULT '',
+		"applied_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range Migrations {
+		if migration.Version >= 43 {
+			continue
+		}
+		if _, err := legacyDB.Exec(`INSERT INTO "_migrations" ("version", "description") VALUES (?, ?)`, migration.Version, migration.Description); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InitDB(dbPath); err != nil {
+		t.Fatalf("InitDB legacy database failed: %v", err)
+	}
+	t.Cleanup(CloseDB)
+	if err := RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations legacy database failed: %v", err)
+	}
+	var sessionColumnCount int
+	if err := DB().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('OIDCLoginTransaction') WHERE name = 'sessionId'`).Scan(&sessionColumnCount); err != nil {
+		t.Fatal(err)
+	}
+	if sessionColumnCount != 1 {
+		t.Fatalf("OIDC transaction session column count = %d, want 1", sessionColumnCount)
+	}
 }
 
 func TestReadingActivityMigrationUpgradesLegacyDatabase(t *testing.T) {

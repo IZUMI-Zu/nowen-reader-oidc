@@ -17,23 +17,26 @@ import (
 )
 
 var (
-	ErrInvalidReturnTo     = errors.New("invalid OIDC return target")
-	ErrInvalidTransaction  = errors.New("invalid or expired OIDC transaction")
-	ErrInvalidIdentity     = errors.New("invalid OIDC identity")
-	ErrProviderUnavailable = errors.New("OIDC provider unavailable")
+	ErrInvalidReturnTo      = errors.New("invalid OIDC return target")
+	ErrInvalidTransaction   = errors.New("invalid or expired OIDC transaction")
+	ErrInvalidIdentity      = errors.New("invalid OIDC identity")
+	ErrProviderUnavailable  = errors.New("OIDC provider unavailable")
+	ErrConfigurationChanged = errors.New("OIDC configuration changed")
 )
 
 type Purpose string
 
 const (
-	PurposeLogin  Purpose = "login"
-	PurposeLink   Purpose = "link"
-	PurposeReauth Purpose = "reauth"
+	PurposeLogin      Purpose = "login"
+	PurposeLink       Purpose = "link"
+	PurposeReauth     Purpose = "reauth"
+	PurposeConfigTest Purpose = "config_test"
 )
 
 type BeginRequest struct {
 	Purpose       Purpose
 	SessionUserID string
+	SessionID     string
 	ReturnTo      string
 }
 
@@ -41,6 +44,7 @@ type AuthorizationRedirect struct {
 	URL          string
 	BindingToken string
 	ExpiresAt    time.Time
+	CookieSecure bool
 }
 
 type CallbackRequest struct {
@@ -55,15 +59,18 @@ type CancelRequest struct {
 }
 
 type LoginTransaction struct {
-	StateHash     string
-	BindingHash   string
-	Nonce         string
-	PKCEVerifier  string
-	Purpose       Purpose
-	SessionUserID string
-	ReturnTo      string
-	ExpiresAt     time.Time
-	CreatedAt     time.Time
+	StateHash         string
+	BindingHash       string
+	Nonce             string
+	PKCEVerifier      string
+	Purpose           Purpose
+	SessionUserID     string
+	SessionID         string
+	ReturnTo          string
+	ExpiresAt         time.Time
+	CreatedAt         time.Time
+	ConfigRevision    int64
+	ConfigFingerprint string
 }
 
 type VerifiedIdentity struct {
@@ -79,9 +86,12 @@ type VerifiedIdentity struct {
 
 type AuthenticatedIdentity struct {
 	VerifiedIdentity
-	Purpose       Purpose
-	SessionUserID string
-	ReturnTo      string
+	Purpose           Purpose
+	SessionUserID     string
+	SessionID         string
+	ReturnTo          string
+	ConfigRevision    int64
+	ConfigFingerprint string
 }
 
 type AuthorizationRequest struct {
@@ -107,17 +117,21 @@ type TransactionStore interface {
 }
 
 type Options struct {
-	BasePath       string
-	TransactionTTL time.Duration
-	Now            func() time.Time
+	BasePath          string
+	TransactionTTL    time.Duration
+	Now               func() time.Time
+	ConfigRevision    int64
+	ConfigFingerprint string
 }
 
 type Service struct {
-	provider     Provider
-	transactions TransactionStore
-	basePath     string
-	ttl          time.Duration
-	now          func() time.Time
+	provider          Provider
+	transactions      TransactionStore
+	basePath          string
+	ttl               time.Duration
+	now               func() time.Time
+	configRevision    int64
+	configFingerprint string
 }
 
 func NewService(provider Provider, transactions TransactionStore, options Options) *Service {
@@ -135,11 +149,13 @@ func NewService(provider Provider, transactions TransactionStore, options Option
 	}
 	return &Service{
 		provider: provider, transactions: transactions, basePath: basePath, ttl: ttl, now: now,
+		configRevision: options.ConfigRevision, configFingerprint: options.ConfigFingerprint,
 	}
 }
 
 func (s *Service) Begin(ctx context.Context, request BeginRequest) (AuthorizationRedirect, error) {
-	if !validPurpose(request.Purpose) || (request.Purpose == PurposeLogin) != (request.SessionUserID == "") {
+	if !validPurpose(request.Purpose) || (request.Purpose == PurposeLogin) != (request.SessionUserID == "") ||
+		(request.Purpose == PurposeConfigTest) != (request.SessionID != "") {
 		return AuthorizationRedirect{}, fmt.Errorf("%w: unsupported purpose", ErrInvalidTransaction)
 	}
 	returnTo, err := validateReturnTo(request.ReturnTo, s.basePath)
@@ -167,15 +183,18 @@ func (s *Service) Begin(ctx context.Context, request BeginRequest) (Authorizatio
 	}
 	now := s.now().UTC()
 	transaction := LoginTransaction{
-		StateHash:     hashToken(state),
-		BindingHash:   hashToken(binding),
-		Nonce:         nonce,
-		PKCEVerifier:  verifier,
-		Purpose:       request.Purpose,
-		SessionUserID: request.SessionUserID,
-		ReturnTo:      returnTo,
-		CreatedAt:     now,
-		ExpiresAt:     now.Add(s.ttl),
+		StateHash:         hashToken(state),
+		BindingHash:       hashToken(binding),
+		Nonce:             nonce,
+		PKCEVerifier:      verifier,
+		Purpose:           request.Purpose,
+		SessionUserID:     request.SessionUserID,
+		SessionID:         request.SessionID,
+		ReturnTo:          returnTo,
+		CreatedAt:         now,
+		ExpiresAt:         now.Add(s.ttl),
+		ConfigRevision:    s.configRevision,
+		ConfigFingerprint: s.configFingerprint,
 	}
 	if err := s.transactions.Create(ctx, transaction); err != nil {
 		return AuthorizationRedirect{}, fmt.Errorf("persist OIDC transaction: %w", err)
@@ -195,7 +214,11 @@ func (s *Service) Complete(ctx context.Context, request CallbackRequest) (Authen
 		return AuthenticatedIdentity{}, fmt.Errorf("consume OIDC transaction: %w", err)
 	}
 	result := AuthenticatedIdentity{
-		Purpose: transaction.Purpose, SessionUserID: transaction.SessionUserID, ReturnTo: transaction.ReturnTo,
+		Purpose: transaction.Purpose, SessionUserID: transaction.SessionUserID, SessionID: transaction.SessionID, ReturnTo: transaction.ReturnTo,
+		ConfigRevision: transaction.ConfigRevision, ConfigFingerprint: transaction.ConfigFingerprint,
+	}
+	if !constantTimeEqual(transaction.ConfigFingerprint, s.configFingerprint) {
+		return result, ErrConfigurationChanged
 	}
 	identity, err := s.provider.Exchange(ctx, request.Code, transaction.PKCEVerifier)
 	if err != nil {
@@ -207,7 +230,7 @@ func (s *Service) Complete(ctx context.Context, request CallbackRequest) (Authen
 	if identity.Issuer != s.provider.Issuer() || identity.Subject == "" || !constantTimeEqual(identity.Nonce, transaction.Nonce) {
 		return result, ErrInvalidIdentity
 	}
-	if transaction.Purpose == PurposeReauth {
+	if transaction.Purpose == PurposeReauth || transaction.Purpose == PurposeConfigTest {
 		const clockSkew = 2 * time.Minute
 		now := s.now().UTC()
 		if identity.AuthTime.IsZero() || identity.AuthTime.Before(transaction.CreatedAt.Add(-clockSkew)) || identity.AuthTime.After(now.Add(clockSkew)) {
@@ -232,11 +255,14 @@ func (s *Service) Cancel(ctx context.Context, request CancelRequest) (string, er
 		}
 		return "", fmt.Errorf("consume cancelled OIDC transaction: %w", err)
 	}
+	if !constantTimeEqual(transaction.ConfigFingerprint, s.configFingerprint) {
+		return transaction.ReturnTo, ErrConfigurationChanged
+	}
 	return transaction.ReturnTo, nil
 }
 
 func validPurpose(purpose Purpose) bool {
-	return purpose == PurposeLogin || purpose == PurposeLink || purpose == PurposeReauth
+	return purpose == PurposeLogin || purpose == PurposeLink || purpose == PurposeReauth || purpose == PurposeConfigTest
 }
 
 func validateReturnTo(raw, basePath string) (string, error) {

@@ -61,12 +61,15 @@ services:
       # 仅在可信反向代理后启用，用于 OPDS 生成正确的外部地址
       # - TRUST_PROXY_HEADERS=true
       # - TRUSTED_PROXIES=172.18.0.1
-      # OIDC（可选）：先在 Provider 注册 PUBLIC_URL + BASE_PATH + /api/auth/oidc/callback
+      # OIDC 推荐由管理员在“设置 → 统一登录”配置；以下为环境变量只读托管模式
       # - PUBLIC_URL=https://reader.example.com
+      # - OIDC_CONFIG_MODE=environment
       # - OIDC_ENABLED=true
       # - OIDC_ISSUER_URL=https://identity.example.com/realms/readers
       # - OIDC_CLIENT_ID=nowen-reader
       # - OIDC_CLIENT_SECRET=replace-with-a-secret
+      # 也可改用 OIDC_CLIENT_SECRET_FILE；Web 数据库模式的根密钥使用 OIDC_CONFIG_KEY_FILE
+      # 紧急恢复密码入口：OIDC_FORCE_PASSWORD_LOGIN=true
       # - OIDC_DISPLAY_NAME=公司账号
       # - OIDC_SCOPES=openid profile email
       # - OIDC_DISABLE_PASSWORD_LOGIN=false

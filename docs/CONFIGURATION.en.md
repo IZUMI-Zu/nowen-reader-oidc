@@ -11,10 +11,14 @@ English · [简体中文](./CONFIGURATION.md)
 | `TRUST_PROXY_HEADERS` | `false` | Trust `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-Prefix`; enable only behind a trusted reverse proxy |
 | `TRUSTED_PROXIES` | — | Explicit trusted proxy IPs/CIDRs, comma-separated; no proxy is trusted by default |
 | `PUBLIC_URL` | — | External OIDC origin such as `https://reader.example.com`; excludes `BASE_PATH`, query, and fragment |
+| `OIDC_CONFIG_MODE` | `auto` | `auto`, `environment`, or `database`; auto preserves environment mode when `OIDC_ENABLED` is explicitly set, otherwise it uses Web configuration |
+| `OIDC_CONFIG_KEY_FILE` | — | External 32-byte encryption key file for database-managed Client Secrets; defaults to `{DATA_DIR}/secrets/oidc-config.key` |
+| `OIDC_FORCE_PASSWORD_LOGIN` | `false` | Deployment recovery switch that forces password login open over the Web setting |
 | `OIDC_ENABLED` | `false` | Explicitly enable OpenID Connect login |
 | `OIDC_ISSUER_URL` | — | Provider's exact HTTPS issuer URL |
 | `OIDC_CLIENT_ID` | — | NowenReader confidential client ID |
 | `OIDC_CLIENT_SECRET` | — | NowenReader confidential client secret |
+| `OIDC_CLIENT_SECRET_FILE` | — | Read the Client Secret from a file in environment mode; mutually exclusive with `OIDC_CLIENT_SECRET` |
 | `OIDC_DISPLAY_NAME` | `OpenID Connect` | Provider label shown on the login page |
 | `OIDC_SCOPES` | `openid profile email` | Space-delimited OAuth scopes; must include `openid` |
 | `OIDC_DISABLE_PASSWORD_LOGIN` | `false` | Disable username/password login and self-registration after enabling OIDC; remains disabled on configuration errors (fail-closed) |
@@ -64,6 +68,8 @@ The proxy must preserve the `/reader` prefix instead of stripping it. After depl
 
 See [OpenID Connect Configuration](./OIDC.en.md) for Provider registration, every option, account migration, safely disabling password login, and recovery.
 
+The recommended flow is to create a local administrator, then use **Settings → Single sign-on** to save a draft, check Discovery, complete a real test login, and enable OIDC without restarting. The environment example below remains available for Docker secrets, Kubernetes, and GitOps; it makes the Web page read-only.
+
 Register this fixed redirect URI with the Provider:
 
 ```text
@@ -74,6 +80,7 @@ Example:
 
 ```yaml
 environment:
+  - OIDC_CONFIG_MODE=environment
   - PUBLIC_URL=https://reader.example.com
   - BASE_PATH=/reader
   - OIDC_ENABLED=true

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	oidcauth "github.com/nowen-reader/nowen-reader/internal/auth/oidc"
+	"github.com/nowen-reader/nowen-reader/internal/auth/oidcruntime"
 	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/model"
@@ -29,6 +31,59 @@ type fakeOIDCService struct {
 	cancelRequest  oidcauth.CancelRequest
 	cancelReturnTo string
 	cancelError    error
+}
+
+type fakeHandlerOIDCRuntime struct {
+	*fakeOIDCService
+	state            oidcruntime.State
+	leaseState       *oidcruntime.State
+	stateCalls       int
+	leaseCalls       int
+	verifiedUser     string
+	verifiedIdentity oidcauth.AuthenticatedIdentity
+	failureAudits    []string
+}
+
+func (r *fakeHandlerOIDCRuntime) RecordAdminFailure(_ context.Context, actorUserID, action, requestID, code string) error {
+	r.failureAudits = append(r.failureAudits, actorUserID+"|"+action+"|"+requestID+"|"+code)
+	return nil
+}
+
+func (r *fakeHandlerOIDCRuntime) State() oidcruntime.State {
+	r.stateCalls++
+	return r.state
+}
+
+func (r *fakeHandlerOIDCRuntime) WithStateLease(run oidcruntime.StateLease) error {
+	r.leaseCalls++
+	state := r.state
+	if r.leaseState != nil {
+		state = *r.leaseState
+	}
+	return run(state)
+}
+
+func (r *fakeHandlerOIDCRuntime) CompleteAndFinalize(ctx context.Context, request oidcauth.CallbackRequest, finalize oidcruntime.CompletionFinalizer) (oidcauth.AuthenticatedIdentity, error) {
+	identity, err := r.Complete(ctx, request)
+	if err != nil || identity.Purpose == oidcauth.PurposeConfigTest {
+		return identity, err
+	}
+	if finalize == nil {
+		return identity, errors.New("OIDC completion finalizer is required")
+	}
+	if err := finalize(r.state, identity); err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
+func (r *fakeHandlerOIDCRuntime) CompleteConfigTest(_ context.Context, actorUserID, actorSessionID, _ string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error) {
+	r.verifiedUser = actorUserID
+	r.verifiedIdentity = identity
+	if identity.SessionID != actorSessionID {
+		return oidcruntime.AdminConfig{}, oidcauth.ErrInvalidTransaction
+	}
+	return oidcruntime.AdminConfig{Status: "ready"}, nil
 }
 
 func (s *fakeOIDCService) Begin(_ context.Context, request oidcauth.BeginRequest) (oidcauth.AuthorizationRedirect, error) {
@@ -116,6 +171,30 @@ func TestOIDCLoginRedirectSetsShortBrowserBindingCookie(t *testing.T) {
 	}
 }
 
+func TestOIDCLoginUsesCookiePolicyCapturedByBegin(t *testing.T) {
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{beginResult: oidcauth.AuthorizationRedirect{
+			URL: "https://identity.example.com/authorize?state=state", BindingToken: "browser-binding",
+			ExpiresAt: time.Now().Add(5 * time.Minute), CookieSecure: true,
+		}},
+		state: oidcruntime.State{
+			Config:    config.OIDCConfig{Enabled: true, SecureCookies: false},
+			Available: true, Ready: true,
+		},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/login", newAuthHandlerWithRuntime(runtime).OIDCLogin)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/login", nil))
+	if response.Code != http.StatusFound {
+		t.Fatalf("login status = %d: %s", response.Code, response.Body.String())
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure {
+		t.Fatalf("transaction cookie ignored Begin snapshot policy: %#v", cookies)
+	}
+}
+
 func TestOIDCCallbackProvisionsSeparateLocalUserAndIssuesBoundedSession(t *testing.T) {
 	cfg := enabledOIDCHandlerConfig()
 	service := &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
@@ -160,6 +239,162 @@ func TestOIDCCallbackProvisionsSeparateLocalUserAndIssuesBoundedSession(t *testi
 	}
 }
 
+func TestOIDCConfigurationTestDelegatesVerifiedIdentityForCurrentAdministrator(t *testing.T) {
+	t.Setenv("BASE_PATH", "/reader")
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-config-test.db")); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	t.Cleanup(store.CloseDB)
+	createLocalAdminForOIDCTest(t)
+	if err := store.CreateSession(&model.UserSession{
+		ID: "admin-config-session", UserID: "local-admin", ExpiresAt: time.Now().Add(time.Hour),
+		AuthMethod: model.SessionAuthMethodPassword, AuthenticatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	cfg := enabledOIDCHandlerConfig()
+	cfg.Enabled = false
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+			VerifiedIdentity: oidcauth.VerifiedIdentity{
+				Issuer: cfg.IssuerURL, Subject: "admin-oidc-subject", Nonce: "verified",
+			},
+			Purpose: oidcauth.PurposeConfigTest, SessionUserID: "local-admin", SessionID: "admin-config-session", ReturnTo: "/reader/settings?tab=authentication",
+		}},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "admin-config-session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if runtime.verifiedUser != "local-admin" {
+		t.Fatalf("verified actor = %q", runtime.verifiedUser)
+	}
+	if runtime.verifiedIdentity.Subject != "admin-oidc-subject" || runtime.verifiedIdentity.Purpose != oidcauth.PurposeConfigTest {
+		t.Fatalf("verified identity = %+v", runtime.verifiedIdentity)
+	}
+}
+
+func TestOIDCConfigurationTestRejectsAnotherSessionForTheSameAdministrator(t *testing.T) {
+	t.Setenv("BASE_PATH", "/reader")
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-config-session.db")); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	t.Cleanup(store.CloseDB)
+	createLocalAdminForOIDCTest(t)
+	for _, sessionID := range []string{"initiating-session", "alternate-session"} {
+		if err := store.CreateSession(&model.UserSession{
+			ID: sessionID, UserID: "local-admin", ExpiresAt: time.Now().Add(time.Hour),
+			AuthMethod: model.SessionAuthMethodPassword, AuthenticatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("CreateSession(%q) error = %v", sessionID, err)
+		}
+	}
+	cfg := enabledOIDCHandlerConfig()
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+			VerifiedIdentity: oidcauth.VerifiedIdentity{Issuer: cfg.IssuerURL, Subject: "admin-oidc-subject"},
+			Purpose:          oidcauth.PurposeConfigTest, SessionUserID: "local-admin", SessionID: "initiating-session",
+			ReturnTo: "/reader/settings?tab=authentication",
+		}},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "alternate-session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?oidc_error=session_mismatch&tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if runtime.verifiedUser != "" || len(runtime.failureAudits) != 1 || !strings.HasSuffix(runtime.failureAudits[0], "|session_mismatch") {
+		t.Fatalf("configuration test was committed or not audited: user=%q audits=%#v", runtime.verifiedUser, runtime.failureAudits)
+	}
+}
+
+func TestOIDCConfigurationTestAuditsIdentityValidationFailure(t *testing.T) {
+	cfg := enabledOIDCHandlerConfig()
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{
+			completeResult: oidcauth.AuthenticatedIdentity{
+				Purpose: oidcauth.PurposeConfigTest, SessionUserID: "local-admin", ReturnTo: "/reader/settings?tab=authentication",
+			},
+			completeError: oidcauth.ErrInvalidIdentity,
+		},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true, Ready: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.Header.Set("X-Request-ID", "request-invalid-auth-time")
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?oidc_error=identity_validation_failed&tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if len(runtime.failureAudits) != 1 || strings.Contains(runtime.failureAudits[0], "request-invalid-auth-time") ||
+		!strings.HasPrefix(runtime.failureAudits[0], "local-admin|verify|") || !strings.HasSuffix(runtime.failureAudits[0], "|identity_validation_failed") {
+		t.Fatalf("failure audits = %#v", runtime.failureAudits)
+	}
+}
+
+func TestOIDCConfigurationTestAuditsSessionMismatchBeforeVerificationCommit(t *testing.T) {
+	cfg := enabledOIDCHandlerConfig()
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+			VerifiedIdentity: oidcauth.VerifiedIdentity{Issuer: cfg.IssuerURL, Subject: "subject"},
+			Purpose:          oidcauth.PurposeConfigTest, SessionUserID: "local-admin", SessionID: "missing-session", ReturnTo: "/reader/settings?tab=authentication",
+		}},
+		state: oidcruntime.State{Config: cfg, Source: oidcruntime.ConfigSourceDatabase, Available: true, Ready: true},
+	}
+	router := gin.New()
+	router.GET("/reader/api/auth/oidc/callback", newAuthHandlerWithRuntime(runtime).OIDCCallback)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.Header.Set("X-Request-ID", "request-session-mismatch")
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?oidc_error=session_mismatch&tab=authentication" {
+		t.Fatalf("callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if len(runtime.failureAudits) != 1 || strings.Contains(runtime.failureAudits[0], "request-session-mismatch") ||
+		!strings.HasPrefix(runtime.failureAudits[0], "local-admin|verify|") || !strings.HasSuffix(runtime.failureAudits[0], "|session_mismatch") {
+		t.Fatalf("failure audits = %#v", runtime.failureAudits)
+	}
+}
+
+func TestOIDCCallbackRejectsOrdinaryLoginAfterOIDCIsDisabled(t *testing.T) {
+	cfg := enabledOIDCHandlerConfig()
+	cfg.Enabled = false
+	service := &fakeOIDCService{completeResult: oidcauth.AuthenticatedIdentity{
+		VerifiedIdentity: oidcauth.VerifiedIdentity{Issuer: cfg.IssuerURL, Subject: "subject", Nonce: "verified"},
+		Purpose:          oidcauth.PurposeLogin, ReturnTo: "/reader/books",
+	}}
+	router := setupOIDCHandlerTest(t, cfg, service)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?code=code&state=state", nil)
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "binding"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/books?oidc_error=configuration_disabled" {
+		t.Fatalf("disabled callback = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+}
+
 func TestOIDCCallbackUnknownIdentityIsForbiddenWhenProvisioningDisabled(t *testing.T) {
 	cfg := enabledOIDCHandlerConfig()
 	cfg.AutoProvision = false
@@ -192,6 +427,22 @@ func TestOIDCCallbackCancellationConsumesTransactionAndReturnsToLocalPage(t *tes
 	}
 	if service.cancelRequest.State != "valid-state" || service.cancelRequest.BindingToken != "browser-binding" || service.callback.Code != "" {
 		t.Fatalf("cancel/complete requests = %+v / %+v", service.cancelRequest, service.callback)
+	}
+}
+
+func TestOIDCCallbackCancellationReportsChangedConfiguration(t *testing.T) {
+	cfg := enabledOIDCHandlerConfig()
+	service := &fakeOIDCService{
+		cancelReturnTo: "/reader/settings?tab=account",
+		cancelError:    oidcauth.ErrConfigurationChanged,
+	}
+	router := setupOIDCHandlerTest(t, cfg, service)
+	request := httptest.NewRequest(http.MethodGet, "/reader/api/auth/oidc/callback?error=access_denied&state=stale-state", nil)
+	request.AddCookie(&http.Cookie{Name: OIDCTransactionCookie, Value: "browser-binding"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/reader/settings?oidc_error=oidc_configuration_changed&tab=account" {
+		t.Fatalf("stale cancellation = %d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
 	}
 }
 
@@ -302,6 +553,34 @@ func TestOIDCPasswordLoginSwitchDisablesLoginRegistrationAndSetup(t *testing.T) 
 	}
 }
 
+func TestPasswordEntryPointsUseLeasedPolicySnapshot(t *testing.T) {
+	visible := oidcruntime.State{Config: config.OIDCConfig{DisablePasswordLogin: false}}
+	leased := oidcruntime.State{Config: config.OIDCConfig{DisablePasswordLogin: true}}
+	for _, endpoint := range []string{"/api/auth/login", "/api/auth/register"} {
+		t.Run(endpoint, func(t *testing.T) {
+			runtime := &fakeHandlerOIDCRuntime{
+				fakeOIDCService: &fakeOIDCService{}, state: visible, leaseState: &leased,
+			}
+			router := gin.New()
+			handler := newAuthHandlerWithRuntime(runtime)
+			if strings.HasSuffix(endpoint, "/login") {
+				router.POST(endpoint, handler.Login)
+			} else {
+				router.POST(endpoint, handler.Register)
+			}
+			response := performRequest(router, http.MethodPost, endpoint, map[string]string{
+				"username": "admin", "password": "password123",
+			})
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), passwordLoginDisabledCode) {
+				t.Fatalf("response = %d: %s", response.Code, response.Body.String())
+			}
+			if runtime.leaseCalls != 1 || runtime.stateCalls != 0 {
+				t.Fatalf("policy reads: lease=%d unlocked=%d", runtime.leaseCalls, runtime.stateCalls)
+			}
+		})
+	}
+}
+
 func TestMeAllowsFirstOIDCLoginOnlyWithSafeBootstrapPolicy(t *testing.T) {
 	for _, tt := range []struct {
 		name              string
@@ -335,6 +614,33 @@ func TestMeAllowsFirstOIDCLoginOnlyWithSafeBootstrapPolicy(t *testing.T) {
 				t.Fatalf("/me = %+v, want needsSetup=%v", body, tt.wantNeedsSetup)
 			}
 		})
+	}
+}
+
+func TestMeDerivesLoginMethodsFromOneRuntimeSnapshot(t *testing.T) {
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-me-snapshot.db")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.CloseDB)
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{},
+		state: oidcruntime.State{
+			Config: config.OIDCConfig{
+				Enabled: true, ProviderName: "Company Login", AutoProvision: true,
+				BootstrapAdminSubjects: map[string]struct{}{"admin-subject": {}},
+			},
+			Available: true, Ready: true,
+		},
+	}
+	router := gin.New()
+	router.GET("/api/auth/me", newAuthHandlerWithRuntime(runtime).Me)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/auth/me", nil))
+	if response.Code != http.StatusOK || runtime.stateCalls != 1 {
+		t.Fatalf("/me = %d: %s; State calls=%d", response.Code, response.Body.String(), runtime.stateCalls)
 	}
 }
 
@@ -405,6 +711,187 @@ func TestOIDCLinkBindsVerifiedIdentityOnlyToTheInitiatingSessionUser(t *testing.
 	linked, err := store.OIDCIdentityBelongsToUser(context.Background(), "local-admin", cfg.IssuerURL, "linked-subject")
 	if err != nil || !linked {
 		t.Fatalf("linked identity = %v, %v", linked, err)
+	}
+}
+
+func TestOIDCUnlinkUsesLeasedPolicySnapshot(t *testing.T) {
+	t.Setenv("BASE_PATH", "/reader")
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-unlink-lease.db")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.CloseDB)
+	createLocalAdminForOIDCTest(t)
+	identity := oidcauth.VerifiedIdentity{Issuer: "https://identity.example.com", Subject: "admin-subject"}
+	if err := store.LinkOIDCIdentity(context.Background(), "local-admin", identity); err != nil {
+		t.Fatal(err)
+	}
+	createSessionForOIDCTest(t, "recent-session", "local-admin", model.SessionAuthMethodPassword, time.Now().UTC())
+	visible := oidcruntime.State{Config: config.OIDCConfig{Enabled: true, IssuerURL: identity.Issuer}}
+	leased := visible
+	leased.PasswordLoginPolicyDisabled = true
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{}, state: visible, leaseState: &leased,
+	}
+	router := gin.New()
+	router.DELETE("/reader/api/auth/oidc/link",
+		middleware.SessionRequired(), middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow),
+		newAuthHandlerWithRuntime(runtime).OIDCUnlink)
+	request := httptest.NewRequest(http.MethodDelete, "/reader/api/auth/oidc/link", nil)
+	request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "recent-session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || runtime.leaseCalls != 1 {
+		t.Fatalf("unlink response = %d: %s; lease calls=%d", response.Code, response.Body.String(), runtime.leaseCalls)
+	}
+	linked, err := store.OIDCIdentityBelongsToUser(context.Background(), "local-admin", identity.Issuer, identity.Subject)
+	if err != nil || !linked {
+		t.Fatalf("leased disabled-password policy allowed unlink: linked=%v err=%v", linked, err)
+	}
+}
+
+func TestUserManagementCannotRemoveLastBoundOIDCAdministrator(t *testing.T) {
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-admin-invariant.db")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.CloseDB)
+	const issuer = "https://identity.example.com"
+	for _, user := range []*model.User{
+		{ID: "operator", Username: "operator", Password: "hash", Nickname: "Operator", Role: "admin"},
+		{ID: "bound-admin", Username: "bound-admin", Password: "hash", Nickname: "Bound", Role: "admin"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.LinkOIDCIdentity(context.Background(), "bound-admin", oidcauth.VerifiedIdentity{
+		Issuer: issuer, Subject: "bound-subject",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createSessionForOIDCTest(t, "operator-session", "operator", model.SessionAuthMethodPassword, time.Now().UTC())
+	runtime := &fakeHandlerOIDCRuntime{
+		fakeOIDCService: &fakeOIDCService{},
+		state: oidcruntime.State{Config: config.OIDCConfig{
+			Enabled: true, IssuerURL: issuer, DisablePasswordLogin: false,
+		}, PasswordLoginPolicyDisabled: true},
+	}
+	router := gin.New()
+	handler := newAuthHandlerWithRuntime(runtime)
+	users := router.Group("/api/auth/users")
+	users.Use(middleware.AdminRequired())
+	users.PUT("", handler.UpdateUser)
+	users.DELETE("", handler.DeleteUserHandler)
+
+	demote := performAuthedRequest(router, http.MethodPut, "/api/auth/users", map[string]string{
+		"action": "updateRole", "userId": "bound-admin", "role": "user",
+	}, "operator-session")
+	if demote.Code != http.StatusConflict || !strings.Contains(demote.Body.String(), "oidc_admin_required") {
+		t.Fatalf("demote = %d: %s", demote.Code, demote.Body.String())
+	}
+	remove := performAuthedRequest(router, http.MethodDelete, "/api/auth/users", map[string]string{
+		"userId": "bound-admin",
+	}, "operator-session")
+	if remove.Code != http.StatusConflict || !strings.Contains(remove.Body.String(), "oidc_admin_required") {
+		t.Fatalf("delete = %d: %s", remove.Code, remove.Body.String())
+	}
+	user, err := store.GetUserByID("bound-admin")
+	if err != nil || user == nil || user.Role != "admin" || runtime.leaseCalls != 2 {
+		t.Fatalf("protected administrator = %+v, err=%v, leaseCalls=%d", user, err, runtime.leaseCalls)
+	}
+}
+
+func TestUserManagementPreservesLastOIDCAdministratorWhenSecretKeyIsUnavailable(t *testing.T) {
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-admin-key-loss.db")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.CloseDB)
+	const issuer = "https://identity.example.com"
+	for _, user := range []*model.User{
+		{ID: "operator", Username: "operator", Password: "hash", Nickname: "Operator", Role: "admin"},
+		{ID: "bound-admin", Username: "bound-admin", Password: "hash", Nickname: "Bound", Role: "admin"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.LinkOIDCIdentity(context.Background(), "bound-admin", oidcauth.VerifiedIdentity{
+		Issuer: issuer, Subject: "bound-subject",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createSessionForOIDCTest(t, "operator-session", "operator", model.SessionAuthMethodPassword, time.Now().UTC())
+
+	configuredProtector, err := oidcruntime.NewAESGCMSecretProtector(
+		[]byte("0123456789abcdef0123456789abcdef"), oidcruntime.SecretProtectionExternalKey,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, keyID, err := configuredProtector.Encrypt([]byte("client-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configStore := store.OIDCConfigStore{}
+	current, err := configStore.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := configStore.Save(context.Background(), oidcruntime.SaveRequest{
+		ExpectedRevision: current.Revision,
+		Next: oidcruntime.StoredConfig{
+			Enabled: true, DisablePasswordLogin: true, IssuerURL: issuer, ClientID: "reader",
+			SecretCiphertext: ciphertext, SecretKeyID: keyID, ProviderName: "Company Login",
+			Scopes: "openid profile email", PublicURL: "https://reader.example.com", SessionTTLSeconds: 43200,
+		},
+		Audit: oidcruntime.AuditEvent{ActorUserID: "operator", Action: "test_setup", Result: "success"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	unavailableProtector, err := oidcruntime.NewAESGCMSecretProtector(
+		[]byte("fedcba9876543210fedcba9876543210"), oidcruntime.SecretProtectionExternalKey,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := oidcruntime.NewManager(context.Background(), oidcruntime.Options{
+		Source: oidcruntime.ConfigSourceDatabase, Repository: configStore, Safety: configStore,
+		Transactions: store.OIDCTransactionStore{}, Protector: unavailableProtector,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	handler := newAuthHandlerWithRuntime(runtime)
+	users := router.Group("/api/auth/users")
+	users.Use(middleware.AdminRequired())
+	users.PUT("", handler.UpdateUser)
+	users.DELETE("", handler.DeleteUserHandler)
+
+	demote := performAuthedRequest(router, http.MethodPut, "/api/auth/users", map[string]string{
+		"action": "updateRole", "userId": "bound-admin", "role": "user",
+	}, "operator-session")
+	if demote.Code != http.StatusConflict || !strings.Contains(demote.Body.String(), "oidc_admin_required") {
+		t.Fatalf("demote during secret-key recovery = %d: %s", demote.Code, demote.Body.String())
+	}
+	remove := performAuthedRequest(router, http.MethodDelete, "/api/auth/users", map[string]string{
+		"userId": "bound-admin",
+	}, "operator-session")
+	if remove.Code != http.StatusConflict || !strings.Contains(remove.Body.String(), "oidc_admin_required") {
+		t.Fatalf("delete during secret-key recovery = %d: %s", remove.Code, remove.Body.String())
+	}
+	user, err := store.GetUserByID("bound-admin")
+	if err != nil || user == nil || user.Role != "admin" {
+		t.Fatalf("protected administrator after secret-key recovery = %+v, err=%v", user, err)
 	}
 }
 
@@ -508,4 +995,74 @@ func TestOIDCOnlyUserCanSetInitialPasswordOnlyAfterRecentAuthentication(t *testi
 	if second.Code != http.StatusConflict {
 		t.Fatalf("second initial-password attempt status = %d, want 409", second.Code)
 	}
+}
+
+func TestPasswordChangeRejectsUnusableBreakGlassPassword(t *testing.T) {
+	router := setupTestRouter(t)
+	cookie := registerAndLogin(t, router)
+	for _, password := range []string{"", "12345"} {
+		response := performAuthedRequest(router, http.MethodPut, "/api/auth/users", map[string]string{
+			"action": "changePassword", "oldPassword": "password123", "newPassword": password,
+		}, cookie)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("new password %q status = %d: %s", password, response.Code, response.Body.String())
+		}
+	}
+	user, err := store.GetUserByUsername("admin")
+	if err != nil || user == nil || bcrypt.CompareHashAndPassword([]byte(user.Password), []byte("password123")) != nil {
+		t.Fatalf("rejected password change altered the recovery credential: user=%+v err=%v", user, err)
+	}
+}
+
+func TestForcePasswordLoginRecoversProductionRoutesFromInvalidEnvironmentOIDC(t *testing.T) {
+	setInvalidFailClosedOIDCEnvironment := func(t *testing.T, forcePasswordLogin string) {
+		t.Helper()
+		t.Setenv("OIDC_CONFIG_MODE", "environment")
+		t.Setenv("OIDC_ENABLED", "true")
+		t.Setenv("OIDC_DISABLE_PASSWORD_LOGIN", "true")
+		t.Setenv("OIDC_FORCE_PASSWORD_LOGIN", forcePasswordLogin)
+		t.Setenv("OIDC_ISSUER_URL", "https://identity.example.com")
+		t.Setenv("OIDC_CLIENT_ID", "reader")
+		t.Setenv("OIDC_CLIENT_SECRET", "")
+		t.Setenv("OIDC_CLIENT_SECRET_FILE", "")
+		t.Setenv("PUBLIC_URL", "https://reader.example.com")
+		t.Setenv("BASE_PATH", "")
+	}
+
+	t.Run("invalid environment remains fail closed without recovery switch", func(t *testing.T) {
+		setInvalidFailClosedOIDCEnvironment(t, "false")
+		router := setupTestRouter(t)
+		response := performRequest(router, http.MethodPost, "/api/auth/register", map[string]string{
+			"username": "admin", "password": "password123",
+		})
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), passwordLoginDisabledCode) {
+			t.Fatalf("fail-closed registration = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("recovery switch enables real password registration and login", func(t *testing.T) {
+		setInvalidFailClosedOIDCEnvironment(t, "true")
+		router := setupTestRouter(t)
+		registered := performRequest(router, http.MethodPost, "/api/auth/register", map[string]string{
+			"username": "admin", "password": "password123",
+		})
+		if registered.Code != http.StatusOK {
+			t.Fatalf("recovery registration = %d: %s", registered.Code, registered.Body.String())
+		}
+		login := performRequest(router, http.MethodPost, "/api/auth/login", map[string]string{
+			"username": "admin", "password": "password123",
+		})
+		if login.Code != http.StatusOK {
+			t.Fatalf("recovery login = %d: %s", login.Code, login.Body.String())
+		}
+		var sessionCookie *http.Cookie
+		for _, cookie := range login.Result().Cookies() {
+			if cookie.Name == middleware.SessionCookie && cookie.Value != "" {
+				sessionCookie = cookie
+			}
+		}
+		if sessionCookie == nil {
+			t.Fatalf("recovery login did not issue a browser session: %#v", login.Result().Cookies())
+		}
+	})
 }

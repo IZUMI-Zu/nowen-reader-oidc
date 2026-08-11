@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -287,11 +288,9 @@ func getCurrentSessionUser(c *gin.Context) *model.AuthUser {
 		}
 		if newExpiry.After(session.ExpiresAt) && store.RenewSession(token, newExpiry) == nil {
 			maxAge := int(newExpiry.Sub(now).Seconds())
-			secure := session.AuthMethod == model.SessionAuthMethodOIDC
-			if secure {
-				if oidcConfig, err := config.GetOIDCConfig(); err == nil {
-					secure = oidcConfig.SecureCookies
-				}
+			secure := session.AuthMethod == model.SessionAuthMethodOIDC && (IsRequestSecure(c) || !isLoopbackRequest(c))
+			if session.AuthMethod == model.SessionAuthMethodOIDC && session.CookieSecure != nil {
+				secure = *session.CookieSecure
 			}
 			SetSessionCookieWithOptions(c, token, maxAge, secure)
 		}
@@ -335,6 +334,16 @@ func IsRequestSecure(c *gin.Context) bool {
 	}
 	forwarded := c.GetHeader("X-Forwarded-Proto")
 	return strings.Contains(strings.ToLower(forwarded), "https")
+}
+
+func isLoopbackRequest(c *gin.Context) bool {
+	host := c.Request.Host
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	return strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())
 }
 
 // SetSessionCookie sets the session cookie on the response.

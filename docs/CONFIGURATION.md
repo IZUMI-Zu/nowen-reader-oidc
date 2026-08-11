@@ -11,10 +11,14 @@
 | `TRUST_PROXY_HEADERS` | `false` | 是否信任 `X-Forwarded-Proto`、`X-Forwarded-Host` 和 `X-Forwarded-Prefix`；仅在可信反向代理后启用 |
 | `TRUSTED_PROXIES` | — | 明确信任的反向代理 IP/CIDR，逗号分隔；默认不信任任何代理 |
 | `PUBLIC_URL` | — | OIDC 对外 origin，例如 `https://reader.example.com`；不包含 `BASE_PATH`、query 或 fragment |
+| `OIDC_CONFIG_MODE` | `auto` | `auto`、`environment` 或 `database`；`auto` 在显式设置 `OIDC_ENABLED` 时兼容环境模式，否则使用 Web 后台配置 |
+| `OIDC_CONFIG_KEY_FILE` | — | 数据库托管 Client Secret 的外部 32-byte 加密 key 文件；未设置时使用 `{DATA_DIR}/secrets/oidc-config.key` |
+| `OIDC_FORCE_PASSWORD_LOGIN` | `false` | 部署侧恢复开关；强制开放密码登录，覆盖 Web 配置 |
 | `OIDC_ENABLED` | `false` | 显式启用 OpenID Connect 登录 |
 | `OIDC_ISSUER_URL` | — | Provider 的精确 HTTPS issuer URL |
 | `OIDC_CLIENT_ID` | — | NowenReader confidential client ID |
 | `OIDC_CLIENT_SECRET` | — | NowenReader confidential client secret |
+| `OIDC_CLIENT_SECRET_FILE` | — | 环境托管模式下从文件读取 Client Secret；不能与 `OIDC_CLIENT_SECRET` 同时设置 |
 | `OIDC_DISPLAY_NAME` | `OpenID Connect` | 登录页显示的 Provider 名称 |
 | `OIDC_SCOPES` | `openid profile email` | 空格分隔的 OAuth scopes；必须包含 `openid` |
 | `OIDC_DISABLE_PASSWORD_LOGIN` | `false` | 启用 OIDC 后关闭用户名/密码登录和自助注册；配置错误时保持关闭（fail-closed） |
@@ -64,6 +68,8 @@ location /reader/ {
 
 完整的 Provider 注册、所有选项、账号迁移、安全关闭密码登录和故障恢复说明见 [OpenID Connect 配置](./OIDC.md)。
 
+推荐先创建本地管理员，再从 **设置 → 统一登录** 保存草稿、检查 Discovery、完成真实测试登录并启用。Web 后台使用数据库托管且无需重启；下面的环境变量方式适用于 Docker secrets、Kubernetes 和 GitOps，启用后 Web 页面只读。
+
 先在 Provider 注册固定回调地址：
 
 ```text
@@ -74,6 +80,7 @@ PUBLIC_URL + BASE_PATH + /api/auth/oidc/callback
 
 ```yaml
 environment:
+  - OIDC_CONFIG_MODE=environment
   - PUBLIC_URL=https://reader.example.com
   - BASE_PATH=/reader
   - OIDC_ENABLED=true

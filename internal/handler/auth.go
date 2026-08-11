@@ -2,15 +2,19 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 
 	oidcauth "github.com/nowen-reader/nowen-reader/internal/auth/oidc"
+	"github.com/nowen-reader/nowen-reader/internal/auth/oidcruntime"
 	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/model"
@@ -19,9 +23,7 @@ import (
 
 // AuthHandler handles all auth-related API endpoints.
 type AuthHandler struct {
-	oidcConfig config.OIDCConfig
-	oidc       oidcLoginService
-	oidcErr    error
+	oidc oidcRuntime
 }
 
 type oidcLoginService interface {
@@ -30,37 +32,69 @@ type oidcLoginService interface {
 	Cancel(ctx context.Context, request oidcauth.CancelRequest) (string, error)
 }
 
-const passwordLoginDisabledCode = "password_login_disabled"
+type oidcRuntime interface {
+	oidcLoginService
+	State() oidcruntime.State
+	WithStateLease(run oidcruntime.StateLease) error
+	CompleteAndFinalize(ctx context.Context, request oidcauth.CallbackRequest, finalize oidcruntime.CompletionFinalizer) (oidcauth.AuthenticatedIdentity, error)
+	CompleteConfigTest(ctx context.Context, actorUserID, actorSessionID, requestID string, identity oidcauth.AuthenticatedIdentity) (oidcruntime.AdminConfig, error)
+	RecordAdminFailure(ctx context.Context, actorUserID, action, requestID, code string) error
+}
 
-func NewAuthHandler() *AuthHandler {
-	cfg, err := config.GetOIDCConfig()
-	if err != nil {
-		if cfg.DisablePasswordLogin {
-			log.Printf("[Auth] OIDC configuration is invalid and password login remains disabled (fail-closed); correct the OIDC configuration or set OIDC_DISABLE_PASSWORD_LOGIN=false: %v", err)
-		} else {
-			log.Printf("[Auth] OIDC configuration is invalid; local authentication remains available: %v", err)
+const passwordLoginDisabledCode = "password_login_disabled"
+const minimumPasswordLength = 6
+const maximumPasswordBytes = 72
+
+func passwordMeetsLengthRequirements(password string) bool {
+	return utf8.RuneCountInString(password) >= minimumPasswordLength && len(password) <= maximumPasswordBytes
+}
+
+// NewOIDCRuntime resolves exactly one configuration authority and builds the
+// process-wide hot-swappable OIDC runtime used by authentication and admin UI.
+func NewOIDCRuntime() (*oidcruntime.Manager, error) {
+	mode, modeErr := config.GetOIDCConfigMode()
+	forcePasswordLogin, forceErr := config.GetOIDCForcePasswordLogin()
+	if forceErr != nil {
+		log.Printf("[Auth] %v; forcing password login on for recovery", forceErr)
+	}
+
+	options := oidcruntime.Options{
+		Source:             oidcruntime.ConfigSourceDatabase,
+		Repository:         store.OIDCConfigStore{},
+		Safety:             store.OIDCConfigStore{},
+		Transactions:       store.OIDCTransactionStore{},
+		BasePath:           config.BasePath(),
+		ForcePasswordLogin: forcePasswordLogin,
+	}
+	if mode == config.OIDCConfigModeEnvironment || modeErr != nil {
+		environmentConfig, environmentErr := config.GetOIDCConfig()
+		options.Source = oidcruntime.ConfigSourceEnvironment
+		options.EnvironmentConfig = environmentConfig
+		options.EnvironmentError = errors.Join(modeErr, environmentErr)
+		if options.EnvironmentError != nil {
+			log.Printf("[Auth] environment-managed OIDC configuration is invalid: %v", options.EnvironmentError)
 		}
-		return newAuthHandlerWithOIDC(cfg, nil, err)
+	} else {
+		protector, protectorErr := oidcruntime.NewFileSecretProtector(config.DataDir(), os.Getenv("OIDC_CONFIG_KEY_FILE"))
+		if protectorErr != nil {
+			log.Printf("[Auth] Web-managed OIDC client secrets are unavailable: %v", protectorErr)
+		} else {
+			options.Protector = protector
+		}
 	}
-	if !cfg.Enabled {
-		return newAuthHandlerWithOIDC(cfg, nil, err)
-	}
-	provider, err := oidcauth.NewRemoteProvider(oidcauth.RemoteProviderConfig{
-		IssuerURL: cfg.IssuerURL, ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret,
-		RedirectURL: cfg.CallbackURL, Scopes: cfg.Scopes,
-	})
-	if err != nil {
-		return newAuthHandlerWithOIDC(cfg, nil, err)
-	}
-	service := oidcauth.NewService(provider, store.OIDCTransactionStore{}, oidcauth.Options{
-		BasePath: config.BasePath(), TransactionTTL: 5 * time.Minute,
-	})
-	return newAuthHandlerWithOIDC(cfg, service, nil)
+	return oidcruntime.NewManager(context.Background(), options)
 }
 
 // Register handles POST /api/auth/register
 func (h *AuthHandler) Register(c *gin.Context) {
-	if !h.requirePasswordLoginEnabled(c) {
+	_ = h.oidc.WithStateLease(func(state oidcruntime.State) error {
+		h.registerWithState(c, state)
+		return nil
+	})
+}
+
+func (h *AuthHandler) registerWithState(c *gin.Context, state oidcruntime.State) {
+	if !passwordLoginEnabled(c, state) {
 		return
 	}
 	var req struct {
@@ -81,8 +115,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if len(req.Password) < 6 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
+	if !passwordMeetsLengthRequirements(req.Password) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters and at most 72 bytes"})
 		return
 	}
 
@@ -103,7 +137,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Registration requires an invitation from admin"})
 			return
 		}
-	} else if h.oidcBootstrapReady() {
+	} else if oidcBootstrapReady(state) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "The first administrator must sign in through the configured OIDC bootstrap identity"})
 		return
 	}
@@ -171,7 +205,14 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 // Login handles POST /api/auth/login
 func (h *AuthHandler) Login(c *gin.Context) {
-	if !h.requirePasswordLoginEnabled(c) {
+	_ = h.oidc.WithStateLease(func(state oidcruntime.State) error {
+		h.loginWithState(c, state)
+		return nil
+	})
+}
+
+func (h *AuthHandler) loginWithState(c *gin.Context, state oidcruntime.State) {
+	if !passwordLoginEnabled(c, state) {
 		return
 	}
 	var req struct {
@@ -226,8 +267,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	})
 }
 
-func (h *AuthHandler) requirePasswordLoginEnabled(c *gin.Context) bool {
-	if !h.oidcConfig.DisablePasswordLogin {
+func passwordLoginEnabled(c *gin.Context, state oidcruntime.State) bool {
+	if !state.Config.DisablePasswordLogin {
 		return true
 	}
 	c.JSON(http.StatusForbidden, gin.H{
@@ -277,8 +318,8 @@ func (h *AuthHandler) SetInitialPassword(c *gin.Context) {
 	var req struct {
 		NewPassword string `json:"newPassword"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < 6 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters"})
+	if err := c.ShouldBindJSON(&req); err != nil || !passwordMeetsLengthRequirements(req.NewPassword) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters and at most 72 bytes"})
 		return
 	}
 	currentUser := middleware.GetCurrentUser(c)
@@ -337,10 +378,12 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		return
 	}
 
+	state := h.oidc.State()
 	if hasUsers == 0 {
-		oidcStatus := h.oidcStatus()
-		bootstrapReady := h.oidcBootstrapReady()
-		passwordLoginEnabled := !h.oidcConfig.DisablePasswordLogin
+		oidcConfig := state.Config
+		oidcStatus := oidcStatus(state)
+		bootstrapReady := oidcBootstrapReady(state)
+		passwordLoginEnabled := !oidcConfig.DisablePasswordLogin
 		registrationMode := "closed"
 		if passwordLoginEnabled && !bootstrapReady {
 			registrationMode = "open"
@@ -352,22 +395,23 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		return
 	}
 
+	oidcConfig := state.Config
 	user := middleware.GetCurrentUser(c)
 	if c.GetHeader("Authorization") != "" && user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-	oidcStatus := h.oidcStatus()
-	if user != nil && h.oidcConfig.Enabled {
-		if linked, err := store.HasOIDCIdentityForUser(c.Request.Context(), user.ID, h.oidcConfig.IssuerURL); err == nil {
+	oidcStatus := oidcStatus(state)
+	if user != nil && oidcConfig.Enabled {
+		if linked, err := store.HasOIDCIdentityForUser(c.Request.Context(), user.ID, oidcConfig.IssuerURL); err == nil {
 			oidcStatus["linked"] = linked
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"user":             user,
 		"needsSetup":       false,
-		"registrationMode": passwordRegistrationMode(h.oidcConfig.DisablePasswordLogin),
-		"loginMethods":     gin.H{"password": !h.oidcConfig.DisablePasswordLogin, "oidc": oidcStatus},
+		"registrationMode": passwordRegistrationMode(oidcConfig.DisablePasswordLogin),
+		"loginMethods":     gin.H{"password": !oidcConfig.DisablePasswordLogin, "oidc": oidcStatus},
 	})
 }
 
@@ -419,6 +463,10 @@ func (h *AuthHandler) UpdateUser(c *gin.Context) {
 
 	switch req.Action {
 	case "changePassword":
+		if !passwordMeetsLengthRequirements(req.NewPassword) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 6 characters and at most 72 bytes"})
+			return
+		}
 		targetID := req.UserID
 		if targetID == "" {
 			targetID = currentUser.ID
@@ -495,7 +543,17 @@ func (h *AuthHandler) UpdateUser(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role, must be 'admin' or 'user'"})
 			return
 		}
-		if err := store.UpdateUserRole(req.UserID, newRole); err != nil {
+		err := h.oidc.WithStateLease(func(state oidcruntime.State) error {
+			return store.UpdateUserRolePreservingOIDCAdmin(req.UserID, newRole, protectedOIDCAdminIssuer(state))
+		})
+		if errors.Is(err, store.ErrOIDCLastBoundAdministrator) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "At least one administrator must remain linked to the active OIDC provider",
+				"code":  "oidc_admin_required",
+			})
+			return
+		}
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
 			return
 		}
@@ -546,12 +604,37 @@ func (h *AuthHandler) DeleteUserHandler(c *gin.Context) {
 		return
 	}
 
-	if err := store.DeleteUser(req.UserID); err != nil {
+	err := h.oidc.WithStateLease(func(state oidcruntime.State) error {
+		return store.DeleteUserPreservingOIDCAdmin(req.UserID, protectedOIDCAdminIssuer(state))
+	})
+	if errors.Is(err, store.ErrOIDCLastBoundAdministrator) {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "At least one administrator must remain linked to the active OIDC provider",
+			"code":  "oidc_admin_required",
+		})
+		return
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func protectedOIDCAdminIssuer(state oidcruntime.State) string {
+	if passwordLoginDisabledByPolicy(state) {
+		return state.Config.IssuerURL
+	}
+	return ""
+}
+
+func passwordLoginDisabledByPolicy(state oidcruntime.State) bool {
+	// Config is the effective runtime policy and can be opened temporarily by
+	// the deployment recovery switch or an invalid database configuration.
+	// Destructive identity changes must still preserve the persisted lockout
+	// invariant for when that temporary recovery condition is removed.
+	return state.PasswordLoginPolicyDisabled || state.Config.DisablePasswordLogin
 }
 
 // CreateUserByAdmin handles POST /api/auth/users (admin only)
@@ -582,8 +665,8 @@ func (h *AuthHandler) CreateUserByAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 3-32 characters"})
 		return
 	}
-	if len(req.Password) < 6 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
+	if !passwordMeetsLengthRequirements(req.Password) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters and at most 72 bytes"})
 		return
 	}
 

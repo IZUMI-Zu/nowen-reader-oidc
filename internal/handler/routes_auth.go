@@ -1,14 +1,25 @@
 package handler
 
 import (
+	"log"
+
 	"github.com/gin-gonic/gin"
+	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
 )
 
 func registerAuthRoutes(api *gin.RouterGroup) {
 	// Auth routes (Phase 1)
 	// ============================================================
-	auth := NewAuthHandler()
+	oidcRuntime, oidcRuntimeErr := NewOIDCRuntime()
+	var auth *AuthHandler
+	if oidcRuntimeErr != nil {
+		log.Printf("[Auth] OIDC runtime initialization failed; local authentication remains available: %v", oidcRuntimeErr)
+		auth = newAuthHandlerWithOIDC(config.OIDCConfig{}, nil, oidcRuntimeErr)
+	} else {
+		auth = newAuthHandlerWithRuntime(oidcRuntime)
+	}
+	oidcAdmin := NewOIDCAdminHandler(oidcRuntime, auth)
 	apiKeys := NewAPIKeyHandler()
 
 	authGroup := api.Group("/auth")
@@ -51,6 +62,15 @@ func registerAuthRoutes(api *gin.RouterGroup) {
 	{
 		adminAPIKeyGroup.GET("", apiKeys.AdminList)
 		adminAPIKeyGroup.DELETE("", apiKeys.AdminRevokeAll)
+	}
+
+	oidcAdminGroup := api.Group("/admin/oidc")
+	oidcAdminGroup.Use(middleware.SessionRequired(), middleware.AdminRequired())
+	{
+		oidcAdminGroup.GET("", oidcAdmin.Get)
+		oidcAdminGroup.PUT("", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitStrict(), oidcAdmin.Update)
+		oidcAdminGroup.POST("/probe", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitStrict(), oidcAdmin.Probe)
+		oidcAdminGroup.POST("/test-login", middleware.RequireRecentAuthentication(middleware.RecentAuthenticationWindow), middleware.RateLimitStrict(), oidcAdmin.BeginTestLogin)
 	}
 
 }

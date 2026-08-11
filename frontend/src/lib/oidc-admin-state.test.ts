@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { expect, test } from "vitest";
 
 import {
   consumeOIDCResumeState,
@@ -7,7 +6,7 @@ import {
   parseOIDCResumeState,
   storeOIDCResumeState,
   toOIDCAdminFields,
-} from "../src/lib/oidc-admin-state.ts";
+} from "./oidc-admin-state";
 
 const validResumeState = {
   version: 1,
@@ -31,7 +30,7 @@ const validResumeState = {
 } as const;
 
 test("resume parser accepts the complete versioned state", () => {
-  assert.deepEqual(parseOIDCResumeState(JSON.stringify(validResumeState)), validResumeState);
+  expect(parseOIDCResumeState(JSON.stringify(validResumeState))).toEqual(validResumeState);
 });
 
 test("resume parser rejects every missing boolean instead of creating uncontrolled inputs", () => {
@@ -43,12 +42,12 @@ test("resume parser rejects every missing boolean instead of creating uncontroll
   ]) {
     const corrupted = structuredClone(validResumeState) as Record<string, unknown>;
     delete corrupted[field];
-    assert.equal(parseOIDCResumeState(JSON.stringify(corrupted)), null, field);
+    expect(parseOIDCResumeState(JSON.stringify(corrupted)), field).toBe(null);
   }
   for (const field of ["enabled", "autoProvision", "disablePasswordLogin"]) {
     const corrupted = structuredClone(validResumeState) as { form: Record<string, unknown> };
     delete corrupted.form[field];
-    assert.equal(parseOIDCResumeState(JSON.stringify(corrupted)), null, `form.${field}`);
+    expect(parseOIDCResumeState(JSON.stringify(corrupted)), `form.${field}`).toBe(null);
   }
 });
 
@@ -60,9 +59,9 @@ test("resume parser rejects corrupt versions, actions, revisions, and numeric fi
     { revision: 1.5 },
     { form: { ...validResumeState.form, sessionTTLHours: null } },
   ]) {
-    assert.equal(parseOIDCResumeState(JSON.stringify({ ...validResumeState, ...patch })), null);
+    expect(parseOIDCResumeState(JSON.stringify({ ...validResumeState, ...patch }))).toBe(null);
   }
-  assert.equal(parseOIDCResumeState("not-json"), null);
+  expect(parseOIDCResumeState("not-json")).toBe(null);
 });
 
 test("storage helpers consume state, omit secrets, and tolerate disabled storage", () => {
@@ -79,37 +78,36 @@ test("storage helpers consume state, omit secrets, and tolerate disabled storage
     clientSecret: "client-secret-sentinel",
     form: { ...validResumeState.form, clientSecret: "client-secret-sentinel" },
   };
-  assert.equal(storeOIDCResumeState(host, pollutedState), true);
+  expect(storeOIDCResumeState(host, pollutedState)).toBe(true);
   const serialized = [...values.values()][0];
-  assert.ok(serialized);
-  assert.equal(serialized.includes("client-secret-sentinel"), false);
-  assert.deepEqual(consumeOIDCResumeState(host), validResumeState);
-  assert.equal(values.size, 0);
+  expect(serialized).toBeTruthy();
+  expect(serialized.includes("client-secret-sentinel")).toBe(false);
+  expect(consumeOIDCResumeState(host)).toEqual(validResumeState);
+  expect(values.size).toBe(0);
 
   const disabled = Object.create(null);
   Object.defineProperty(disabled, "sessionStorage", {
     get() { throw new Error("storage disabled"); },
   });
-  assert.equal(storeOIDCResumeState(disabled, validResumeState), false);
-  assert.equal(consumeOIDCResumeState(disabled), null);
+  expect(storeOIDCResumeState(disabled, validResumeState)).toBe(false);
+  expect(consumeOIDCResumeState(disabled)).toBe(null);
 });
 
 test("form conversion validates TTL while preserving opaque client identifiers", () => {
   const fields = toOIDCAdminFields(validResumeState.form, "invalid ttl");
-  assert.equal(fields.clientID, " opaque-client ");
-  assert.equal(fields.issuerURL, "https://identity.example.com");
-  assert.equal(fields.sessionTTLSeconds, 43_200);
-  assert.deepEqual(fields.scopes, ["openid", "profile", "email"]);
-  assert.throws(
+  expect(fields.clientID).toBe(" opaque-client ");
+  expect(fields.issuerURL).toBe("https://identity.example.com");
+  expect(fields.sessionTTLSeconds).toBe(43_200);
+  expect(fields.scopes).toEqual(["openid", "profile", "email"]);
+  expect(
     () => toOIDCAdminFields({ ...validResumeState.form, sessionTTLHours: 0.01 }, "invalid ttl"),
-    /invalid ttl/,
-  );
+  ).toThrow(/invalid ttl/);
 });
 
 test("reauthentication return targets exclude browser-only fragments", () => {
-  assert.equal(oidcReauthenticationReturnTo({
+  expect(oidcReauthenticationReturnTo({
     pathname: "/reader/settings",
     search: "?tab=authentication&oidc_admin_resume=1",
     hash: "#danger-zone",
-  }), "/reader/settings?tab=authentication&oidc_admin_resume=1");
+  })).toBe("/reader/settings?tab=authentication&oidc_admin_resume=1");
 });

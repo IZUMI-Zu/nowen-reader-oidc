@@ -1,4 +1,4 @@
-import type { OIDCAdminConfig, OIDCAdminFields } from "../api/oidc.ts";
+import type { OIDCAdminConfig, OIDCAdminFields } from "@/api/oidc";
 
 export type OIDCSensitiveAction = "save" | "probe" | "test";
 

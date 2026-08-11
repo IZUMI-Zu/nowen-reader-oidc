@@ -97,8 +97,6 @@ func checkLibraryManageAccess(c *gin.Context, libraryID string) error {
 
 type ImageHandler struct{}
 
-const contextKeyPrivateImageCache = "private_image_cache"
-
 // NewImageHandler creates a new ImageHandler.
 func NewImageHandler() *ImageHandler {
 	return &ImageHandler{}
@@ -301,12 +299,9 @@ func (h *ImageHandler) GetThumbnail(c *gin.Context) {
 			strconv.FormatInt(stat.Size(), 36),
 		)
 	}
-	cacheControl := "public, max-age=300, must-revalidate"
-	if c.GetBool(contextKeyPrivateImageCache) {
-		cacheControl = "private, max-age=300, must-revalidate"
-		c.Header("Vary", "Authorization, Cookie")
-	}
-	c.Header("Cache-Control", cacheControl)
+	// 缩略图路由要求登录且按书库权限过滤，共享缓存不能跨用户复用它。
+	c.Header("Cache-Control", "private, max-age=300, must-revalidate")
+	c.Header("Vary", "Authorization, Cookie")
 
 	// Check If-None-Match for 304
 	if c.GetHeader("If-None-Match") == etag {

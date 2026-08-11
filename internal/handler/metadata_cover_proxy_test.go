@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/nowen-reader/nowen-reader/internal/archive"
 	"github.com/nowen-reader/nowen-reader/internal/config"
 	"github.com/nowen-reader/nowen-reader/internal/middleware"
@@ -187,6 +188,85 @@ func TestNonEHGroupCoverRedirectSuppressesReferrer(t *testing.T) {
 	if policy := response.Header().Get("Referrer-Policy"); policy != "no-referrer" {
 		t.Fatalf("non-EH redirect referrer policy = %q", policy)
 	}
+}
+
+// 有书库权限、但合集成员一本都不在这些书库里，同样不能读封面。
+func TestGroupCoverRejectsUserWhoseLibrariesHoldNoGroupMembers(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	router := setupTestRouter(t)
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := registerAndLogin(t, router)
+	readerCookie := createCoverReader(t, router, adminCookie, "scoped-reader")
+
+	for _, id := range []string{"cover-hidden-library", "cover-visible-library"} {
+		if err := store.CreateLibrary(&model.Library{
+			ID: id, Name: id, Type: "comic", RootPath: t.TempDir(),
+			Enabled: true, DefaultAccess: "private", ScanEnabled: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.DB().Exec(`
+		INSERT INTO "Comic" ("id", "filename", "title", "type", "libraryId", "relativePath")
+		VALUES ('cover-hidden-comic', 'hidden.cbz', 'Hidden member', 'comic', 'cover-hidden-library', 'hidden.cbz')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := store.GetUserByUsername("scoped-reader")
+	if err != nil || reader == nil {
+		t.Fatalf("load reader: %#v, %v", reader, err)
+	}
+	if err := store.SetUserLibraryAccess(reader.ID, []store.LibraryAccessReq{
+		{LibraryID: "cover-visible-library", CanView: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	groupID64, err := store.CreateGroupWithItems("Hidden cover group", "", []string{"cover-hidden-comic"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := int(groupID64)
+	coverURL := "https://ul.ehgt.org/g/hidden.png"
+	if err := store.UpdateGroupMetadata(groupID, store.GroupMetadataUpdate{CoverURL: &coverURL}); err != nil {
+		t.Fatal(err)
+	}
+	thumbDir := config.GetThumbnailsDir()
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(thumbDir, archive.GroupCoverCacheName(groupID)),
+		handlerSolidPNG(t, color.RGBA{G: 200, A: 255}), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	path := "/api/comics/group_" + strconv.Itoa(groupID) + "/thumbnail"
+	response := performAuthedRequest(router, http.MethodGet, path, nil, readerCookie)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("group cover status for a reader with no visible members = %d, want 403", response.Code)
+	}
+}
+
+func createCoverReader(t *testing.T, router *gin.Engine, adminCookie, username string) string {
+	t.Helper()
+	createUser := performAuthedRequest(router, http.MethodPost, "/api/auth/users", map[string]any{
+		"username": username, "password": "readerpass", "nickname": username, "role": "user",
+	}, adminCookie)
+	if createUser.Code != http.StatusOK {
+		t.Fatalf("create reader: %d %s", createUser.Code, createUser.Body.String())
+	}
+	login := performRequest(router, http.MethodPost, "/api/auth/login", map[string]string{
+		"username": username, "password": "readerpass",
+	})
+	for _, cookie := range login.Result().Cookies() {
+		if cookie.Name == middleware.SessionCookie {
+			return cookie.Value
+		}
+	}
+	t.Fatalf("reader login failed: %d %s", login.Code, login.Body.String())
+	return ""
 }
 
 func TestGroupCoverRejectsUserWithoutMemberLibraryAccess(t *testing.T) {

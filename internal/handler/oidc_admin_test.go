@@ -113,6 +113,41 @@ func TestOIDCAdminAPIStoresButNeverReturnsClientSecret(t *testing.T) {
 		t.Fatalf("UI/API/database field contract mismatch: %+v", contract)
 	}
 
+	clearBody := `{
+		"expectedRevision":1,
+		"clearClientSecret":true,
+		"config":{
+			"enabled":false,
+			"issuerURL":"https://identity.example.com",
+			"clientID":"nowen-reader",
+			"providerName":"Company Login",
+			"scopes":["openid","profile","email"],
+			"publicURL":"https://reader.example.com",
+			"autoProvision":true,
+			"sessionTTLSeconds":28800,
+			"disablePasswordLogin":false
+		}
+	}`
+	clearRequest := httptest.NewRequest(http.MethodPut, "/reader/api/admin/oidc", strings.NewReader(clearBody))
+	clearRequest.Header.Set("Content-Type", "application/json")
+	clearRequest.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "admin-session"})
+	clearResponse := httptest.NewRecorder()
+	router.ServeHTTP(clearResponse, clearRequest)
+	if clearResponse.Code != http.StatusOK {
+		t.Fatalf("clear secret status = %d: %s", clearResponse.Code, clearResponse.Body.String())
+	}
+	var cleared oidcruntime.AdminConfig
+	if err := json.Unmarshal(clearResponse.Body.Bytes(), &cleared); err != nil {
+		t.Fatalf("decode clear-secret response: %v", err)
+	}
+	stored, err := (store.OIDCConfigStore{}).Load(context.Background())
+	if err != nil {
+		t.Fatalf("load cleared configuration: %v", err)
+	}
+	if cleared.ClientSecretConfigured || stored.SecretCiphertext != "" || stored.SecretKeyID != "" {
+		t.Fatalf("clear-secret request retained credentials: response=%+v stored=%+v", cleared, stored)
+	}
+
 	oidcOnlyUser := &model.User{ID: "oidc-only", Username: "oidc-only", Nickname: "OIDC Only", Role: "user"}
 	if err := store.CreateUser(oidcOnlyUser); err != nil {
 		t.Fatal(err)

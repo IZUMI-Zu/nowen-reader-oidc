@@ -141,6 +141,28 @@ describe("OIDCSettingsPanel", () => {
     await screen.findByText("Configuration saved. Protocol changes require another successful test login.");
   });
 
+  test("forwards an explicit request to clear the stored Client Secret", async () => {
+    mocks.get.mockResolvedValue(managedConfig());
+    mocks.update.mockResolvedValue(managedConfig({
+      revision: 8,
+      clientSecretConfigured: false,
+    }));
+
+    render(<OIDCSettingsPanel />);
+
+    const clearSecret = await screen.findByRole("checkbox", {
+      name: "Clear the stored secret when saving",
+    });
+    fireEvent.click(clearSecret);
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledOnce());
+    expect(mocks.update).toHaveBeenCalledWith(expect.objectContaining({
+      clientSecret: undefined,
+      clearClientSecret: true,
+    }));
+  });
+
   test("consumes and resumes a passwordless administrator action after OIDC reauthentication", async () => {
     mocks.authUser.hasPassword = false;
     const current = managedConfig();

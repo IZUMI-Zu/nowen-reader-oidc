@@ -1,10 +1,12 @@
 "use client";
 
 import { apiPath } from "@/lib/base-path";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useTranslation, useLocale } from "@/lib/i18n";
 import { Search, Download, Check, Loader2, BookOpen, FileSearch, Filter } from "lucide-react";
 import { emitScrapeApplied } from "@/lib/sync-event";
+import { useEHentaiSettings } from "@/hooks/useEHentaiSettings";
+import { MetadataCoverPreview } from "@/components/MetadataCoverPreview";
 
 interface MetadataResult {
   title?: string;
@@ -16,6 +18,9 @@ interface MetadataResult {
   genre?: string;
   seriesName?: string;
   coverUrl?: string;
+  externalRating?: number;
+  externalRatingMax?: number;
+  externalRatingSource?: string;
   source: string;
 }
 
@@ -32,6 +37,7 @@ const COMIC_SOURCES = [
   { id: "mangadex", name: "MangaDex", icon: "📖" },
   { id: "mangaupdates", name: "MangaUpdates", icon: "📋" },
   { id: "kitsu", name: "Kitsu", icon: "🦊" },
+  { id: "ehentai", name: "E-Hentai / ExHentai", icon: "🔞" },
 ] as const;
 
 // 小说数据源
@@ -41,7 +47,8 @@ const NOVEL_SOURCES = [
   { id: "anilist_novel", name: "AniList", icon: "🅰" },
 ] as const;
 
-const DEFAULT_COMIC_SOURCES = COMIC_SOURCES.map((s) => s.id);
+// EH/EX is always opt-in so ordinary and automatic searches never contact it.
+const DEFAULT_COMIC_SOURCES = COMIC_SOURCES.filter((s) => s.id !== "ehentai").map((s) => s.id);
 const DEFAULT_NOVEL_SOURCES = NOVEL_SOURCES.map((s) => s.id);
 
 const SOURCE_COLORS: Record<string, string> = {
@@ -52,6 +59,8 @@ const SOURCE_COLORS: Record<string, string> = {
   mangadex: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
   mangaupdates: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
   kitsu: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+  ehentai: "bg-red-500/15 text-red-600 dark:text-red-400",
+  exhentai: "bg-red-700/15 text-red-700 dark:text-red-300",
   googlebooks: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
   comicinfo: "bg-gray-500/15 text-gray-600 dark:text-gray-400",
 };
@@ -67,10 +76,13 @@ interface Props {
 export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApplied }: Props) {
   const t = useTranslation();
   const { locale } = useLocale();
+  const { settings: ehentaiSettings } = useEHentaiSettings();
 
   // 优先使用数据库 type 字段判断，fallback 到文件后缀
   const isNovel = comicType ? comicType === "novel" : isNovelFile(filename);
-  const availableSources = isNovel ? NOVEL_SOURCES : COMIC_SOURCES;
+  const availableSources = isNovel
+    ? NOVEL_SOURCES
+    : COMIC_SOURCES.filter((source) => source.id !== "ehentai" || (ehentaiSettings?.enabled && ehentaiSettings.configurationValid));
   const defaultSources = isNovel ? DEFAULT_NOVEL_SOURCES : DEFAULT_COMIC_SOURCES;
 
   const getSourceName = (id: string) => {
@@ -86,6 +98,12 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
   const [enabledSources, setEnabledSources] = useState<string[]>(defaultSources as unknown as string[]);
   const [showSourceFilter, setShowSourceFilter] = useState(false);
   const [skipCover, setSkipCover] = useState(false); // P2-A: 不替换封面
+
+  useEffect(() => {
+    if (!ehentaiSettings?.enabled || !ehentaiSettings.configurationValid) {
+      setEnabledSources((previous) => previous.filter((source) => source !== "ehentai"));
+    }
+  }, [ehentaiSettings?.enabled, ehentaiSettings?.configurationValid]);
 
   const toggleSource = (id: string) => {
     setEnabledSources((prev) =>
@@ -107,6 +125,7 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
         sources: enabledSources.join(","),
         lang: locale,
         contentType: isNovel ? "novel" : "comic",
+        comicId,
       });
       const res = await fetch(apiPath(`/api/metadata/search?${params}`));
       const data = await res.json();
@@ -277,11 +296,9 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
             >
               <div className="flex items-start justify-between gap-2">
                 {result.coverUrl && (
-                  <img
-                    src={result.coverUrl}
-                    alt={result.title || "cover"}
-                    className="w-12 h-16 object-cover rounded flex-shrink-0 bg-card-hover"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                  <MetadataCoverPreview
+                    coverUrl={result.coverUrl}
+                    title={result.title}
                   />
                 )}
                 <div className="flex-1 min-w-0">
@@ -309,6 +326,12 @@ export function MetadataSearch({ comicId, comicTitle, filename, comicType, onApp
                   {result.description && (
                     <div className="text-xs text-muted mt-1 line-clamp-2">
                       {result.description}
+                    </div>
+                  )}
+                  {result.externalRating != null && (
+                    <div className="text-xs text-muted">
+                      {t.metadata?.externalRating || "External rating"}: {result.externalRating}
+                      {result.externalRatingMax != null ? `/${result.externalRatingMax}` : ""}
                     </div>
                   )}
                   {result.genre && (

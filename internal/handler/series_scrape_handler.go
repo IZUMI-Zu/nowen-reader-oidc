@@ -47,8 +47,14 @@ func (h *SeriesHandler) ScrapeMetadata(c *gin.Context) {
 		body.Lang = "zh"
 	}
 	body.ContentType = detectSeriesContentType(detail)
+	requestedSources := append([]string(nil), body.Sources...)
 	body.Sources = filterSeriesMetadataSources(body.Sources, body.ContentType)
-	results := service.SearchMetadata(body.Query, body.Sources, body.Lang, body.ContentType)
+	if len(requestedSources) > 0 && len(body.Sources) == 0 {
+		c.JSON(http.StatusOK, gin.H{"results": []service.ComicMetadata{}, "detectedContentType": body.ContentType})
+		return
+	}
+	options := metadataSearchOptionsForTags(body.Sources, detail.Series.Tags, body.Query, detail.Series.Title)
+	results := searchMetadataWithOptionsContext(c.Request.Context(), body.Query, body.Sources, body.Lang, options, body.ContentType)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}
@@ -80,6 +86,12 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 	applyAll := len(fields) == 0
 	shouldApply := func(field string) bool { return applyAll || fields[field] }
 	meta := body.Metadata
+	if meta.CoverURL != "" && shouldApply("cover") {
+		if err := service.ValidateMetadataCoverURL(meta.Source, meta.CoverURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "封面地址不符合所选元数据源的安全规则"})
+			return
+		}
+	}
 	update := store.SeriesMetadataUpdate{}
 	metadataChanged := false
 
@@ -130,35 +142,47 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 		metadataLocked := true
 		update.MetadataLocked = &metadataLocked
 	}
-	if err := store.UpdateSeriesMetadata(detail.Series.ID, update); err != nil {
+	var mergedTags []string
+	applyTags := false
+	if meta.Genre != "" && shouldApply("tags") {
+		existing, err := store.GetSeriesTags(detail.Series.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取目录作品标签失败"})
+			return
+		}
+		names := make([]string, 0, len(existing))
+		for _, tag := range existing {
+			names = append(names, tag.Name)
+		}
+		incoming := splitAndTrim(meta.Genre)
+		if len(incoming) > 0 {
+			mergedTags = mergeMetadataTags(names, incoming, update.Genre != nil)
+			applyTags = true
+		}
+	}
+	var updateErr error
+	if applyTags {
+		updateErr = store.UpdateSeriesMetadataAndTags(detail.Series.ID, update, mergedTags)
+	} else {
+		updateErr = store.UpdateSeriesMetadata(detail.Series.ID, update)
+	}
+	if updateErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用目录作品元数据失败"})
 		return
 	}
-
-	if meta.Genre != "" && shouldApply("tags") {
-		existing, _ := store.GetSeriesTags(detail.Series.ID)
-		names := make([]string, 0, len(existing))
-		seen := make(map[string]struct{}, len(existing))
-		for _, tag := range existing {
-			names = append(names, tag.Name)
-			seen[tag.Name] = struct{}{}
-		}
-		for _, name := range splitAndTrim(meta.Genre) {
-			if _, exists := seen[name]; !exists {
-				names = append(names, name)
-				seen[name] = struct{}{}
-			}
-		}
-		if err := store.SetSeriesTags(detail.Series.ID, names); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "保存目录作品标签失败"})
+	if applyTags && body.SyncTags {
+		total, synced, _, err := store.SyncSeriesTagsToItems(detail.Series.ID)
+		if err != nil || synced != total {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "目录作品标签已保存，但同步成员标签失败",
+				"syncSuccess": synced,
+				"syncErrors":  total - synced,
+			})
 			return
-		}
-		if body.SyncTags {
-			_, _, _, _ = store.SyncSeriesTagsToItems(detail.Series.ID)
 		}
 	}
 	if meta.CoverURL != "" && shouldApply("cover") {
-		go service.DownloadSeriesCover(detail.Series.ID, meta.CoverURL)
+		service.ScheduleSeriesCoverRefresh(detail.Series.ID, meta.CoverURL, meta.Source)
 	}
 
 	var syncSuccess, syncErrors int
@@ -168,7 +192,15 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "目录作品阅读单元加载失败"})
 			return
 		}
-		syncSuccess, syncErrors, _ = syncMetadataToComicIDs(ids, meta, fields, body.Overwrite, body.SyncRating)
+		syncSuccess, syncErrors, err = syncMetadataToComicIDs(ids, meta, fields, body.Overwrite, body.SyncRating)
+		if err != nil || syncErrors > 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "目录作品元数据已保存，但同步成员字段失败",
+				"syncSuccess": syncSuccess,
+				"syncErrors":  syncErrors,
+			})
+			return
+		}
 	}
 	updated, err := store.GetSeriesDetail(detail.Series.ID, getUserID(c))
 	if err != nil || updated == nil {
@@ -276,6 +308,7 @@ func filterSeriesMetadataSources(sources []string, contentType string) []string 
 		"mangadex":      contentType == "comic",
 		"mangaupdates":  contentType == "comic",
 		"kitsu":         contentType == "comic",
+		"ehentai":       contentType == "comic",
 		"googlebooks":   contentType == "novel",
 		"bangumi_novel": contentType == "novel",
 		"anilist_novel": contentType == "novel",

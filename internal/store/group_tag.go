@@ -41,13 +41,41 @@ func GetGroupTags(groupID int) ([]Tag, error) {
 // SetGroupTags 设置系列的标签（替换所有现有标签）。
 // tagNames: 标签名称列表，不存在的标签会自动创建。
 func SetGroupTags(groupID int, tagNames []string) error {
-	// 先删除现有关联
-	if _, err := db.Exec(`DELETE FROM "ComicGroupTag" WHERE "groupId" = ?`, groupID); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := setGroupTags(tx, groupID, tagNames); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func setGroupTags(database tagDatabase, groupID int, tagNames []string) error {
+	rows, err := database.Query(`SELECT "tagId" FROM "ComicGroupTag" WHERE "groupId" = ?`, groupID)
+	if err != nil {
+		return err
+	}
+	var previousTagIDs []int
+	for rows.Next() {
+		var tagID int
+		if err := rows.Scan(&tagID); err != nil {
+			rows.Close()
+			return err
+		}
+		previousTagIDs = append(previousTagIDs, tagID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 
-	if len(tagNames) == 0 {
-		return nil
+	if _, err := database.Exec(`DELETE FROM "ComicGroupTag" WHERE "groupId" = ?`, groupID); err != nil {
+		return err
 	}
 
 	// 确保标签存在并获取 ID
@@ -58,22 +86,32 @@ func SetGroupTags(groupID int, tagNames []string) error {
 		}
 		// 查找或创建标签
 		var tagID int
-		err := db.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID)
+		err := database.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID)
 		if err == sql.ErrNoRows {
 			// 创建新标签
-			res, err := db.Exec(`INSERT INTO "Tag" ("name", "color") VALUES (?, '')`, name)
+			res, err := database.Exec(`INSERT INTO "Tag" ("name", "color") VALUES (?, '')`, name)
 			if err != nil {
-				continue
+				return err
 			}
-			id, _ := res.LastInsertId()
+			id, err := res.LastInsertId()
+			if err != nil {
+				return err
+			}
 			tagID = int(id)
 		} else if err != nil {
-			continue
+			return err
 		}
 		// 添加关联
-		db.Exec(`INSERT OR IGNORE INTO "ComicGroupTag" ("groupId", "tagId") VALUES (?, ?)`, groupID, tagID)
+		if _, err := database.Exec(`INSERT OR IGNORE INTO "ComicGroupTag" ("groupId", "tagId") VALUES (?, ?)`, groupID, tagID); err != nil {
+			return err
+		}
 	}
 
+	for _, tagID := range previousTagIDs {
+		if err := deleteTagIfUnreferenced(database, tagID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -98,6 +136,12 @@ func SyncGroupTagsToVolumes(groupID int) (totalVolumes, syncedVolumes, tagsCount
 
 	var tagNames []string
 	for _, t := range groupTags {
+		// A gallery source identifies the group metadata result itself. Copying
+		// it to every member would overwrite each comic's own exact gallery
+		// identity and make later source-based lookups resolve the wrong work.
+		if IsEHentaiGallerySourceTag(t.Name) {
+			continue
+		}
 		tagNames = append(tagNames, t.Name)
 	}
 
@@ -137,22 +181,19 @@ func OverrideGroupTagsToVolumes(groupID int) (totalVolumes, syncedVolumes, tagsS
 
 	var tagNames []string
 	for _, t := range groupTags {
+		if IsEHentaiGallerySourceTag(t.Name) {
+			continue
+		}
 		tagNames = append(tagNames, t.Name)
 	}
 
 	totalVolumes = len(group.Comics)
 
-	// 对每本漫画：先清除所有标签，再添加系列标签
+	// 对每本漫画：保留实体自己的 EH/EX gallery 身份，覆盖其余标签。
 	for _, comic := range group.Comics {
-		if e := ClearAllTagsFromComic(comic.ComicID); e != nil {
-			log.Printf("[OverrideGroupTags] 清除漫画 %s 标签失败: %v", comic.ComicID, e)
+		if e := ReplaceAllTagsOnComicPreservingMatching(comic.ComicID, tagNames, IsEHentaiGallerySourceTag); e != nil {
+			log.Printf("[OverrideGroupTags] 设置漫画 %s 标签失败: %v", comic.ComicID, e)
 			continue
-		}
-		if len(tagNames) > 0 {
-			if e := AddTagsToComic(comic.ComicID, tagNames); e != nil {
-				log.Printf("[OverrideGroupTags] 设置漫画 %s 标签失败: %v", comic.ComicID, e)
-				continue
-			}
 		}
 		syncedVolumes++
 	}

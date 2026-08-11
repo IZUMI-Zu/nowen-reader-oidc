@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/nowen-reader/nowen-reader/internal/service"
@@ -176,6 +178,7 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 	if body.Lang == "" {
 		body.Lang = "zh"
 	}
+	sourcesExplicitlySelected := len(body.Sources) > 0
 	// 如果未指定数据源，根据 contentType 自动选择默认数据源
 	// 注意：如果 contentType 为空，将在每个系列处理时自动检测
 	if len(body.Sources) == 0 && body.ContentType != "" {
@@ -221,17 +224,21 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 		if groupCT == "" {
 			groupCT = detectGroupContentType(group)
 		}
-		// 根据内容类型选择数据源
-		sources := body.Sources
-		if body.ContentType == "" {
-			// 未指定全局 contentType 时，按每个系列的类型自动选择数据源
-			if groupCT == "novel" {
-				sources = []string{"googlebooks", "anilist_novel", "bangumi_novel"}
-			} else {
-				sources = []string{"anilist", "bangumi", "mangadex", "mangaupdates", "kitsu"}
-			}
+		// Preserve an explicit UI selection. Only choose defaults when the
+		// request omitted sources entirely.
+		sources := resolveBatchMetadataSources(body.Sources, groupCT, sourcesExplicitlySelected)
+		if len(sources) == 0 {
+			result.Error = "所选元数据源不支持该系列内容类型"
+			results = append(results, result)
+			continue
 		}
-		metaResults := service.SearchMetadata(group.Name, sources, body.Lang, groupCT)
+		options, optionsErr := groupMetadataSearchOptions(gid, sources, group.Name, group.Name)
+		if optionsErr != nil {
+			result.Error = "读取合集标签失败"
+			results = append(results, result)
+			continue
+		}
+		metaResults := searchMetadataWithOptionsContext(c.Request.Context(), group.Name, sources, body.Lang, options, groupCT)
 		if len(metaResults) == 0 {
 			result.Error = "未找到匹配的元数据"
 			results = append(results, result)
@@ -254,6 +261,14 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 			applyAll := len(body.Fields) == 0
 			shouldApply := func(field string) bool {
 				return applyAll || fieldsSet[field]
+			}
+			if bestMatch.CoverURL != "" && shouldApply("cover") {
+				if err := service.ValidateMetadataCoverURL(bestMatch.Source, bestMatch.CoverURL); err != nil {
+					result.Error = "封面地址不符合所选元数据源的安全规则"
+					result.Success = false
+					results = append(results, result)
+					continue
+				}
 			}
 
 			update := store.GroupMetadataUpdate{}
@@ -295,52 +310,69 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 			if bestMatch.CoverURL != "" && shouldApply("cover") {
 				update.CoverURL = &bestMatch.CoverURL
 			}
+			if bestMatch.ExternalRating != nil && shouldApply("rating") {
+				update.ExternalRating = bestMatch.ExternalRating
+				update.ExternalRatingMax = bestMatch.ExternalRatingMax
+				update.ExternalRatingSource = &bestMatch.ExternalRatingSource
+				now := time.Now().UTC()
+				update.ExternalRatingUpdatedAt = &now
+			}
 
-			if err := store.UpdateGroupMetadata(gid, update); err != nil {
-				result.Error = "应用元数据失败: " + err.Error()
+			var mergedTags []string
+			applyTags := false
+			if bestMatch.Genre != "" && shouldApply("tags") {
+				genres := splitAndTrim(bestMatch.Genre)
+				if len(genres) > 0 {
+					existingTags, err := store.GetGroupTags(gid)
+					if err != nil {
+						result.Error = "读取现有标签失败: " + err.Error()
+						result.Success = false
+						results = append(results, result)
+						continue
+					}
+					existingNames := make([]string, 0, len(existingTags))
+					for _, t := range existingTags {
+						existingNames = append(existingNames, t.Name)
+					}
+					mergedTags = mergeMetadataTags(existingNames, genres, update.Genre != nil)
+					applyTags = true
+				}
+			}
+			var updateErr error
+			if applyTags {
+				updateErr = store.UpdateGroupMetadataAndTags(gid, update, mergedTags)
+			} else {
+				updateErr = store.UpdateGroupMetadata(gid, update)
+			}
+			if updateErr != nil {
+				result.Error = "应用元数据失败: " + updateErr.Error()
 				result.Success = false
 				results = append(results, result)
 				continue
 			}
-
-			// 处理标签
-			if bestMatch.Genre != "" && shouldApply("tags") {
-				genres := splitAndTrim(bestMatch.Genre)
-				if len(genres) > 0 {
-					existingTags, _ := store.GetGroupTags(gid)
-					existingNames := make(map[string]bool)
-					for _, t := range existingTags {
-						existingNames[t.Name] = true
-					}
-					allNames := make([]string, 0)
-					for _, t := range existingTags {
-						allNames = append(allNames, t.Name)
-					}
-					for _, g := range genres {
-						if !existingNames[g] {
-							allNames = append(allNames, g)
-						}
-					}
-					_ = store.SetGroupTags(gid, allNames)
-					if body.SyncTags && allowMemberSync {
-						_, _, _, _ = store.SyncGroupTagsToVolumes(gid)
-					}
-				}
+			if update.CoverURL != nil {
+				service.ScheduleGroupCoverRefresh(gid, *update.CoverURL, bestMatch.Source)
 			}
-
-			// 下载封面
-			if bestMatch.CoverURL != "" && shouldApply("cover") {
-				go service.DownloadGroupCover(gid, bestMatch.CoverURL)
+			if applyTags && body.SyncTags && allowMemberSync {
+				total, synced, _, err := store.SyncGroupTagsToVolumes(gid)
+				if err != nil || synced != total {
+					result.Error = fmt.Sprintf("合集标签已保存，但同步成员标签失败 (%d/%d)", synced, total)
+					result.Success = false
+					results = append(results, result)
+					continue
+				}
 			}
 
 			// 同步到所有卷
 			if body.SyncToVolumes && allowMemberSync {
-				successCount, errorCount, err := syncGroupMetadataToVolumes(gid, bestMatch, fieldsSet, body.Overwrite, false)
-				if err != nil {
-					log.Printf("[API] BatchScrape: syncToVolumes error for group %d: %v", gid, err)
-				} else {
-					log.Printf("[API] BatchScrape: synced to %d volumes (%d errors) for group %d", successCount, errorCount, gid)
+				successCount, errorCount, err := syncGroupMetadataToVolumes(gid, bestMatch, fieldsSet, body.Overwrite, shouldApply("rating"))
+				if err != nil || errorCount > 0 {
+					result.Error = fmt.Sprintf("合集元数据已保存，但同步成员字段失败 (%d success, %d errors): %v", successCount, errorCount, err)
+					result.Success = false
+					results = append(results, result)
+					continue
 				}
+				log.Printf("[API] BatchScrape: synced to %d volumes (%d errors) for group %d", successCount, errorCount, gid)
 			}
 
 			result.Applied = true
@@ -371,4 +403,16 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 		"failed":  totalFailed,
 		"applied": totalApplied,
 	})
+}
+
+func resolveBatchMetadataSources(requested []string, contentType string, explicitlySelected bool) []string {
+	sources := append([]string(nil), requested...)
+	if !explicitlySelected {
+		if contentType == "novel" {
+			sources = []string{"googlebooks", "anilist_novel", "bangumi_novel"}
+		} else {
+			sources = []string{"anilist", "bangumi", "mangadex", "mangaupdates", "kitsu"}
+		}
+	}
+	return filterSeriesMetadataSources(sources, contentType)
 }

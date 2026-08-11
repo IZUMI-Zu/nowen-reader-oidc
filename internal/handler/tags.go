@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/nowen-reader/nowen-reader/internal/middleware"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
 
@@ -15,9 +16,32 @@ func NewTagHandler() *TagHandler {
 	return &TagHandler{}
 }
 
-// GET /api/tags — List all tags
+// GET /api/tags — List tags visible to the current user. scope=comics returns
+// only tags usable by the comic-list filter. Without a scope, administrators
+// retain the all-owner Tag Manager view while readers remain ComicTag-scoped.
 func (h *TagHandler) ListTags(c *gin.Context) {
-	tags, err := store.GetAllTags()
+	user := middleware.GetCurrentUser(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
+	var (
+		tags []store.TagWithCount
+		err  error
+	)
+	comicScope := c.Query("scope") == "comics"
+	if user.Role == "admin" && comicScope {
+		tags, err = store.GetAllComicTags()
+	} else if user.Role == "admin" {
+		tags, err = store.GetAllTags()
+	} else {
+		var libraryIDs []string
+		libraryIDs, err = store.GetUserAccessibleLibraryIDs(user.ID)
+		if err == nil {
+			tags, err = store.GetComicTagsForLibraries(libraryIDs)
+		}
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tags"})
 		return

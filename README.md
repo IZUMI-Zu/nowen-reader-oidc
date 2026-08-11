@@ -50,7 +50,7 @@ NowenReader 是一个专为 NAS 与个人服务器场景优化的自托管漫画
 ## ✨ 核心特性
 
 - **📚 内容管理** — 多格式支持、自动扫描入库、标签 & 分类、合并分组、收藏 & 评分、用户级阅读状态（想读/在读/已读完）、按阅读状态筛选、元数据编辑、文件上传、批量操作、重复检测、无效清理
-- **🔍 元数据抓取** — AniList / Bangumi / MangaDex / MangaUpdates / Kitsu 五大数据源，支持 ComicInfo.xml 和小说元数据自动提取
+- **🔍 元数据抓取** — AniList / Bangumi / MangaDex / MangaUpdates / Kitsu，以及可选的 E-Hentai / ExHentai 元数据源；支持 ComicInfo.xml 和小说元数据自动提取
 - **🤖 AI 智能辅助（可选）** — 语义搜索、智能摘要、标签 / 分类建议、封面分析、文件名解析、阅读洞察、AI 对话、章节摘要、页面翻译等 18 项能力
 - **📖 阅读体验** — 漫画多种阅读模式（单页/双页/条漫/Webtoon）、图片滤镜与预设、Webtoon 双击缩放、漫画书签、小说章节渲染、PDF 渲染、继续阅读、阅读统计、阅读目标、数据导出
 - **📡 协议集成** — 支持 OPDS（KOReader / Moon+ Reader 等阅读器远程串流）
@@ -86,6 +86,7 @@ docker compose -f docker-compose.prod.yml up -d
 | [安装指南](./docs/INSTALL.md) | 5 种部署方式：Docker Hub、NAS、源码构建、二进制、Docker Compose |
 | [配置说明](./docs/CONFIGURATION.md) | 环境变量、站点设置、AI 配置、扫描器参数、支持格式 |
 | [OpenID Connect 配置](./docs/OIDC.md) | Provider 注册、账号绑定、关闭密码登录、安全恢复与故障排查 |
+| [E-Hentai / ExHentai 插件](./docs/EHENTAI.md) | 可选元数据源、Cookie 安全、限流、映射与故障排查 |
 | [API 文档](./docs/API.md) | 完整的 RESTful API 参考 |
 | [开发指南](./docs/DEVELOPMENT.md) | 前置条件、项目结构、Makefile 命令、技术栈、CI/CD |
 | [常见问题](./docs/FAQ.md) | 部署、权限、缩略图、PDF、AI、OPDS 等常见问题 |

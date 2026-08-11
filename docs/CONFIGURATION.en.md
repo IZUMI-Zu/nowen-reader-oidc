@@ -25,6 +25,10 @@ English · [简体中文](./CONFIGURATION.md)
 | `OIDC_AUTO_PROVISION` | `false` | Automatically create a local regular user for an unknown `(issuer, subject)` |
 | `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` | — | Exact OIDC subjects allowed to become the first admin; prefer a local break-glass admin instead |
 | `OIDC_SESSION_MAX_AGE` | `12h` | Non-renewable absolute lifetime for local OIDC sessions, from `5m` to `720h` |
+| `EHENTAI_IPB_MEMBER_ID` | — | Optional account cookie; required for ExHentai and paired with the pass hash |
+| `EHENTAI_IPB_PASS_HASH` | — | Optional account cookie; environment-only and never committed to Git |
+| `EHENTAI_STAR` | — | Optional `star` cookie |
+| `EHENTAI_IGNEOUS` | — | Optional `igneous` cookie |
 | `DATABASE_URL` | `./data/nowen-reader.db` | SQLite database file path |
 | `COMICS_DIR` | `./comics` | Manga main directory |
 | `NOVELS_DIR` | `./novels` | Novels main directory |
@@ -95,6 +99,10 @@ Create a local break-glass administrator first, then explicitly link OIDC from a
 
 Set `OIDC_DISABLE_PASSWORD_LOGIN=true` only after validating a real OIDC login and the administrator identity binding. It disables `/api/auth/login`, self-registration, and the Web password form, but does not delete local password hashes, existing sessions, or API keys; session-bound password reauthentication remains available for sensitive actions. The last OIDC identity cannot be unlinked while password login is disabled. A Provider outage then prevents new logins; recover by setting this variable back to `false` and restarting the service. If the OIDC configuration itself is invalid, the disable request remains effective so a configuration mistake cannot silently reopen password login.
 
+## E-Hentai / ExHentai metadata
+
+See [E-Hentai / ExHentai Metadata Plugin](./EHENTAI.en.md) for the WebUI switch, public EH, authenticated EX, cookie security, field mapping, rate limits, and troubleshooting. Administrators manage enablement, site, title preference, expunged search, and language restriction in the WebUI; environment variables store cookies only. The source is disabled and unselected by default and reads metadata only.
+
 ## Site Settings
 
 Modify via the **Settings** panel in the web UI, or edit `{DATA_DIR}/site-config.json` directly:
@@ -112,6 +120,13 @@ Modify via the **Settings** panel in the web UI, or edit `{DATA_DIR}/site-config
   "language": "zh-CN",
   "theme": "dark",
   "registrationMode": "open",
+  "ehentai": {
+    "enabled": false,
+    "site": "ehentai",
+    "preferOriginalTitle": false,
+    "searchExpunged": false,
+    "forcedLanguage": ""
+  },
   "scannerConfig": {
     "syncCooldownSec": 30,
     "fsDebounceMs": 2000,
@@ -201,5 +216,6 @@ The legacy `ComicsDir`, `ExtraComicsDirs`, `NovelsDir`, `ExtraNovelsDirs` enviro
 
 - 📦 [Installation Guide](./INSTALL.en.md)
 - 🔐 [OpenID Connect Configuration](./OIDC.en.md)
+- 🔞 [E-Hentai / ExHentai Metadata Plugin](./EHENTAI.en.md)
 - 📚 [FAQ](./FAQ.md)
 - 🛠️ [Development Guide](./DEVELOPMENT.md)

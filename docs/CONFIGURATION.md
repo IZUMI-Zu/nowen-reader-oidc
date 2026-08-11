@@ -25,6 +25,10 @@
 | `OIDC_AUTO_PROVISION` | `false` | 是否为未知 `(issuer, subject)` 自动创建本地普通用户 |
 | `OIDC_BOOTSTRAP_ADMIN_SUBJECTS` | — | 可成为首个管理员的精确 OIDC subject，逗号分隔；推荐留空并先创建本地管理员 |
 | `OIDC_SESSION_MAX_AGE` | `12h` | OIDC 本地 Session 不可续期突破的绝对时限，范围 `5m`–`720h` |
+| `EHENTAI_IPB_MEMBER_ID` | — | 可选账号 Cookie；ExHentai 必填，必须与 pass hash 成对配置 |
+| `EHENTAI_IPB_PASS_HASH` | — | 可选账号 Cookie；仅从环境读取，禁止提交到 Git |
+| `EHENTAI_STAR` | — | 可选 `star` Cookie |
+| `EHENTAI_IGNEOUS` | — | 可选 `igneous` Cookie |
 | `DATABASE_URL` | `./data/nowen-reader.db` | SQLite 数据库文件路径 |
 | `COMICS_DIR` | `./comics` | 漫画主目录 |
 | `NOVELS_DIR` | `./novels` | 电子书主目录 |
@@ -95,6 +99,10 @@ environment:
 
 只有在真实 OIDC 登录和管理员身份绑定已经验收后，才应设置 `OIDC_DISABLE_PASSWORD_LOGIN=true`。它会同时关闭 `/api/auth/login`、自助注册和 Web 密码表单，但不会删除本地密码、已有 Session 或 API Key；Session 内的密码 reauth 仍可用于敏感操作。关闭密码登录时不能解除最后一个 OIDC 身份。Provider 故障时将无法创建新登录，恢复方法是把该变量改回 `false` 并重启服务。若 OIDC 配置本身无效，关闭请求仍然保持生效，避免密码入口因配置错误意外重新开放。
 
+## E-Hentai / ExHentai 元数据
+
+完整的 WebUI 开关、公开 EH、登录 EX、Cookie 安全、字段映射、限流和故障排查说明见 [E-Hentai / ExHentai 元数据插件](./EHENTAI.md)。该来源的开关、站点、标题偏好、expunged 搜索和语言限定均由管理员 WebUI 管理；环境变量只保存 Cookie。来源默认关闭且不会自动选中，只提供元数据，不下载画廊内容。
+
 ## 站点设置
 
 可通过 Web UI 的 **设置** 面板修改，或直接编辑 `{DATA_DIR}/site-config.json`：
@@ -112,6 +120,13 @@ environment:
   "language": "zh-CN",
   "theme": "dark",
   "registrationMode": "open",
+  "ehentai": {
+    "enabled": false,
+    "site": "ehentai",
+    "preferOriginalTitle": false,
+    "searchExpunged": false,
+    "forcedLanguage": ""
+  },
   "scannerConfig": {
     "syncCooldownSec": 30,
     "fsDebounceMs": 2000,
@@ -215,5 +230,6 @@ environment:
 
 - 📦 [安装指南](./INSTALL.md)
 - 🔐 [OpenID Connect 配置](./OIDC.md)
+- 🔞 [E-Hentai / ExHentai 元数据插件](./EHENTAI.md)
 - 📚 [常见问题](./FAQ.md)
 - 🛠️ [开发指南](./DEVELOPMENT.md)

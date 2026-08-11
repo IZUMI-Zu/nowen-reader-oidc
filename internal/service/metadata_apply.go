@@ -2,7 +2,9 @@ package service
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
@@ -19,9 +21,24 @@ import (
 
 const maxCoverDownloadBytes = 20 << 20
 
-// 合集封面下载去重：同一 groupID 同时只有一个下载任务，其余等待结果
-var groupCoverDownload sync.Map  // groupID -> chan struct{}
-var seriesCoverDownload sync.Map // seriesID -> chan struct{}
+var errEHCoverRequest = errors.New("E-Hentai cover request failed")
+
+type coverDownloadState struct {
+	coverURL string
+	done     chan struct{}
+}
+
+// 封面下载去重：同一封面 key（合集或目录作品）同时只有一个下载任务。等待者
+// 会比较 URL，避免旧任务完成后让新的封面更新误用旧缓存。
+var coverDownload sync.Map // cover key -> *coverDownloadState
+
+const coverPublishLockCount = 64
+
+var coverPublishLocks [coverPublishLockCount]sync.Mutex
+
+// Test seam invoked while the group-cover publication lock is held, after the
+// current URL check and immediately before the cache is replaced.
+var groupCoverBeforePublish func(int)
 
 // ============================================================
 // Apply metadata to comic
@@ -60,6 +77,9 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 	if err != nil || existing == nil {
 		return nil, fmt.Errorf("comic not found: %s", comicID)
 	}
+	if err := ValidateMetadataCoverURL(meta.Source, meta.CoverURL); err != nil {
+		return nil, err
+	}
 
 	updates := map[string]interface{}{}
 
@@ -82,7 +102,10 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 	if meta.Language != "" && shouldUpdate(existing.Language) {
 		updates["language"] = meta.Language
 	}
-	if meta.Genre != "" && shouldUpdate(existing.Genre) {
+	// genre 文本和 ComicTag 是同一份标签的两种存储，必须一起更新：只改其中一个
+	// 会让 genre 停留在旧画廊，而标签里的 source: 已经指向新画廊。
+	genreApplied := meta.Genre != "" && shouldUpdate(existing.Genre)
+	if genreApplied {
 		updates["genre"] = meta.Genre
 	}
 	if meta.Year != nil {
@@ -102,7 +125,31 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 		updates[k] = v
 	}
 
-	if len(updates) > 0 {
+	// Resolve normalized tags before writing so comic fields and the EH/EX
+	// gallery identity can be committed by one store transaction.
+	var tagNames []string
+	var replaceMatcher func(string) bool
+	for _, rawTag := range strings.Split(meta.Genre, ",") {
+		tagName := strings.TrimSpace(rawTag)
+		if tagName == "" {
+			continue
+		}
+		if IsEHentaiGallerySourceTag(tagName) {
+			// gallery 身份要跟 genre 文本走：genre 这次没更新就不能换 source
+			// 标签，否则展示的画廊和搜索直达的画廊会是两个。其余标签照旧追加。
+			if !genreApplied {
+				continue
+			}
+			replaceMatcher = IsEHentaiGallerySourceTag
+		}
+		tagNames = append(tagNames, tagName)
+	}
+
+	if len(tagNames) > 0 {
+		if err := store.UpdateComicFieldsAndTagsReplacingMatching(comicID, updates, tagNames, replaceMatcher); err != nil {
+			return nil, fmt.Errorf("update comic metadata and tags: %w", err)
+		}
+	} else if len(updates) > 0 {
 		if err := store.UpdateComicFields(comicID, updates); err != nil {
 			return nil, fmt.Errorf("update comic fields: %w", err)
 		}
@@ -113,25 +160,10 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 	if meta.CoverURL != "" && !opt.SkipCover {
 		archive.ClearThumbnailCache(comicID)
 		go func() {
-			if err := cacheCoverAsThumbnail(comicID, meta.CoverURL); err != nil {
+			if err := cacheCoverAsThumbnailForSource(comicID, meta.CoverURL, meta.Source); err != nil {
 				log.Printf("[metadata] Cover cache failed for %s: %v", comicID, err)
 			}
 		}()
-	}
-
-	// Add genres as tags
-	if meta.Genre != "" {
-		genres := strings.Split(meta.Genre, ",")
-		var tagNames []string
-		for _, g := range genres {
-			g = strings.TrimSpace(g)
-			if g != "" {
-				tagNames = append(tagNames, g)
-			}
-		}
-		if len(tagNames) > 0 {
-			_ = store.AddTagsToComic(comicID, tagNames)
-		}
 	}
 
 	return store.GetComicByID(comicID)
@@ -145,16 +177,21 @@ func downloadCoverAsThumbnail(comicID, coverURL string) {
 }
 
 func cacheCoverAsThumbnail(comicID, coverURL string) error {
+	return cacheCoverAsThumbnailForSource(comicID, coverURL, "")
+}
+
+func cacheCoverAsThumbnailForSource(comicID, coverURL, metadataSource string) error {
 	// Bangumi 等源可能返回 http:// URL，Go HTTP 客户端会跟随重定向，
 	// 但显式转为 https 更安全
 	coverURL = strings.Replace(coverURL, "http://", "https://", 1)
+	metadataSource = metadataCoverPolicySource(metadataSource, coverURL)
 
 	thumbDir := config.GetThumbnailsDir()
 	if err := os.MkdirAll(thumbDir, 0755); err != nil {
 		return err
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := metadataCoverHTTPClient(metadataSource)
 	req, err := http.NewRequest("GET", coverURL, nil)
 	if err != nil {
 		return err
@@ -164,8 +201,12 @@ func cacheCoverAsThumbnail(comicID, coverURL string) error {
 	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		if err != nil {
+			if isEHMetadataSource(metadataSource) {
+				return errEHCoverRequest
+			}
 			return err
 		}
+		resp.Body.Close()
 		return fmt.Errorf("download cover returned HTTP %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
@@ -194,68 +235,162 @@ func cacheCoverAsThumbnail(comicID, coverURL string) error {
 	return nil
 }
 
-// DownloadGroupCover 保存系列封面 URL 到数据库，并下载到本地缓存。
-func DownloadGroupCover(groupID int, coverURL string) {
+// DownloadGroupCover replaces the local cache for the cover URL already saved
+// on the group. Callers persist the URL before scheduling this download.
+func DownloadGroupCover(groupID int, coverURL string, metadataSources ...string) {
+	downloadGroupCover(groupID, coverURL, true, metadataSources...)
+}
+
+// ScheduleGroupCoverRefresh invalidates the prior browser-visible cache before
+// returning, then refreshes it asynchronously. Handlers should call this only
+// after the new cover URL has been committed to the database.
+func ScheduleGroupCoverRefresh(groupID int, coverURL string, metadataSources ...string) {
+	ClearGroupCoverCache(groupID)
+	go DownloadGroupCover(groupID, coverURL, metadataSources...)
+}
+
+// EnsureGroupCoverCached downloads a missing cache without replacing a valid
+// cache produced by another request for the same URL.
+func EnsureGroupCoverCached(groupID int, coverURL string, metadataSources ...string) {
+	downloadGroupCover(groupID, coverURL, false, metadataSources...)
+}
+
+func downloadGroupCover(groupID int, coverURL string, replace bool, metadataSources ...string) {
 	if coverURL == "" {
 		return
 	}
-	// Bangumi 等源可能返回 http:// URL，强制转为 https://
-	coverURL = strings.Replace(coverURL, "http://", "https://", 1)
-
-	// 保存外部 URL 到数据库
-	if err := store.UpdateGroupMetadata(groupID, store.GroupMetadataUpdate{
-		CoverURL: &coverURL,
-	}); err != nil {
-		log.Printf("[metadata] Group cover URL save failed for group %d: %v", groupID, err)
+	metadataSource := metadataCoverPolicySource(firstMetadataSource(metadataSources), coverURL)
+	if err := ValidateMetadataCoverURL(metadataSource, coverURL); err != nil {
+		log.Printf("[metadata] Group cover rejected for group %d: %v", groupID, err)
 		return
 	}
-	log.Printf("[metadata] Group cover URL saved for group %d", groupID)
-
-	// 下载封面到本地缓存
-	downloadGroupCoverToLocal(groupID, coverURL)
+	// Bangumi 等源可能返回 http:// URL，强制转为 https://，但只在数据库
+	// 仍保存调用方观察到的 URL 时更新，避免旧异步任务覆盖新值。
+	storedURL, err := store.GetGroupStoredCoverURL(groupID)
+	if err != nil {
+		return
+	}
+	coverURL = strings.Replace(coverURL, "http://", "https://", 1)
+	normalizedStoredURL := strings.Replace(strings.TrimSpace(storedURL), "http://", "https://", 1)
+	if normalizedStoredURL != coverURL {
+		return
+	}
+	if storedURL != coverURL {
+		updated, err := store.UpdateGroupStoredCoverURLIfCurrent(groupID, storedURL, coverURL)
+		if err != nil || !updated {
+			return
+		}
+	}
+	if !groupCoverURLIsCurrent(groupID, coverURL) {
+		// The handler has already stored a newer URL, so this asynchronous task
+		// must not restore an older cover or cache.
+		return
+	}
+	downloadGroupCoverToLocal(groupID, coverURL, metadataSource, replace)
 }
 
 // downloadGroupCoverToLocal 下载合集封面图片并保存为本地 WebP 缩略图。
 // 使用去重机制确保同一 groupID 同时只有一个下载任务。
-func downloadGroupCoverToLocal(groupID int, coverURL string) {
+func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string, replace bool) {
 	thumbDir := config.GetThumbnailsDir()
 	if err := os.MkdirAll(thumbDir, 0755); err != nil {
 		return
 	}
 
-	// 快速路径：磁盘缓存命中
 	cacheName := archive.GroupCoverCacheName(groupID)
 	cachePath := filepath.Join(thumbDir, cacheName)
-	if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
+	if !replace && coverCacheExists(cachePath) {
 		return
 	}
 
-	// 去重：如果同一 groupID 正在下载，等待其完成后重新检查缓存
-	ch, loaded := groupCoverDownload.LoadOrStore(groupID, make(chan struct{}, 1))
-	done := ch.(chan struct{})
-	if loaded {
-		// 其他 goroutine 正在下载，等待完成
-		<-done
-		// 重新检查缓存是否被成功写入
-		if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-			return
+	key := groupCoverKey(groupID)
+	for {
+		state := &coverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+		activeValue, loaded := coverDownload.LoadOrStore(key, state)
+		if loaded {
+			active := activeValue.(*coverDownloadState)
+			<-active.done
+			if active.coverURL == coverURL {
+				// 领跑者已经为同一个 URL 跑过了。成功就用它的结果；失败也不能
+				// 让每个等待者各自再打一次远端，否则一次冷缓存的封面墙会被
+				// 放大成 N 次请求。
+				return
+			}
+			// A different URL finished. Acquire the next slot so this request can
+			// replace it, unless the database says this request is now stale.
+			if !groupCoverURLIsCurrent(groupID, coverURL) {
+				return
+			}
+			continue
 		}
-		// 下载失败，等待下次请求时重新尝试
+
+		func() {
+			defer func() {
+				close(state.done)
+				coverDownload.Delete(key)
+			}()
+			if !groupCoverURLIsCurrent(groupID, coverURL) {
+				return
+			}
+			if !replace && coverCacheExists(cachePath) {
+				return
+			}
+			if replace {
+				ClearGroupCoverCache(groupID)
+			}
+			downloadGroupCoverToLocalInternal(groupID, coverURL, metadataSource, thumbDir, cachePath)
+		}()
 		return
 	}
+}
 
-	// 当前 goroutine 负责下载，完成后通知等待者
-	defer func() {
-		close(done)
-		groupCoverDownload.Delete(groupID)
-	}()
+func coverCacheExists(cachePath string) bool {
+	data, err := os.ReadFile(cachePath)
+	return err == nil && len(data) > 0
+}
 
-	downloadGroupCoverToLocalInternal(groupID, coverURL, thumbDir, cachePath)
+func groupCoverKey(groupID int) string {
+	return fmt.Sprintf("group_%d", groupID)
+}
+
+func seriesCoverKey(seriesID string) string {
+	return "series_" + seriesID
+}
+
+// normalizeStoredCoverURL 复用写入时的规范化规则，让"数据库里现在还是不是这个
+// 封面"的比较不会因为 http/https 或空白而误判。
+func normalizeStoredCoverURL(coverURL string) string {
+	return strings.Replace(strings.TrimSpace(coverURL), "http://", "https://", 1)
+}
+
+func groupCoverURLIsCurrent(groupID int, coverURL string) bool {
+	storedURL, err := store.GetGroupStoredCoverURL(groupID)
+	return err == nil && normalizeStoredCoverURL(storedURL) == coverURL
+}
+
+func seriesCoverURLIsCurrent(seriesID, coverURL string) bool {
+	storedURL, err := store.GetSeriesStoredCoverURL(seriesID)
+	return err == nil && normalizeStoredCoverURL(storedURL) == coverURL
+}
+
+func coverPublishLock(key string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(key))
+	return &coverPublishLocks[hash.Sum32()%coverPublishLockCount]
+}
+
+// ClearGroupCoverCache serializes cache invalidation with remote and data URL
+// publication so an older in-flight request cannot recreate a cleared cover.
+func ClearGroupCoverCache(groupID int) {
+	lock := coverPublishLock(groupCoverKey(groupID))
+	lock.Lock()
+	defer lock.Unlock()
+	archive.ClearGroupCoverCache(groupID)
 }
 
 // downloadGroupCoverToLocalInternal 执行实际的封面下载和保存逻辑。
-func downloadGroupCoverToLocalInternal(groupID int, coverURL string, thumbDir string, cachePath string) {
-	client := &http.Client{Timeout: 30 * time.Second}
+func downloadGroupCoverToLocalInternal(groupID int, coverURL, metadataSource, thumbDir, cachePath string) {
+	client := metadataCoverHTTPClient(metadataSource)
 	req, err := http.NewRequest("GET", coverURL, nil)
 	if err != nil {
 		return
@@ -264,6 +399,9 @@ func downloadGroupCoverToLocalInternal(groupID int, coverURL string, thumbDir st
 
 	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -282,6 +420,16 @@ func downloadGroupCoverToLocalInternal(groupID int, coverURL string, thumbDir st
 		// Fallback: 保存原始图片数据
 		log.Printf("[metadata] Group cover cache failed for group %d: %v", groupID, err)
 		return
+	}
+	lock := coverPublishLock(groupCoverKey(groupID))
+	lock.Lock()
+	defer lock.Unlock()
+	if !groupCoverURLIsCurrent(groupID, coverURL) {
+		// A newer handler update won while this request was in flight.
+		return
+	}
+	if groupCoverBeforePublish != nil {
+		groupCoverBeforePublish(groupID)
 	}
 	archive.ClearGroupCoverCache(groupID)
 	_ = os.WriteFile(cachePath, webpData, 0644)
@@ -313,6 +461,13 @@ func CacheGroupCoverDataURL(groupID int, coverDataURL string) error {
 	if err != nil {
 		return err
 	}
+	lock := coverPublishLock(groupCoverKey(groupID))
+	lock.Lock()
+	defer lock.Unlock()
+	storedURL, err := store.GetGroupStoredCoverURL(groupID)
+	if err != nil || storedURL != coverDataURL {
+		return fmt.Errorf("group cover changed before data URL cache publication")
+	}
 	archive.ClearGroupCoverCache(groupID)
 	cachePath := filepath.Join(thumbDir, archive.GroupCoverCacheName(groupID))
 	if err := os.WriteFile(cachePath, webpData, 0644); err != nil {
@@ -322,13 +477,34 @@ func CacheGroupCoverDataURL(groupID int, coverDataURL string) error {
 	return nil
 }
 
-func DownloadSeriesCover(seriesID, coverURL string) {
+// ClearSeriesCoverCache 与远端发布串行，避免在飞的旧任务重建刚清掉的封面。
+func ClearSeriesCoverCache(seriesID string) {
+	lock := coverPublishLock(seriesCoverKey(seriesID))
+	lock.Lock()
+	defer lock.Unlock()
+	archive.ClearSeriesCoverCache(seriesID)
+}
+
+// ScheduleSeriesCoverRefresh 在返回前作废浏览器可见的旧缓存，再异步刷新。
+// 调用方必须先把新封面 URL 提交到数据库。
+func ScheduleSeriesCoverRefresh(seriesID, coverURL string, metadataSources ...string) {
+	ClearSeriesCoverCache(seriesID)
+	go DownloadSeriesCover(seriesID, coverURL, metadataSources...)
+}
+
+func DownloadSeriesCover(seriesID, coverURL string, metadataSources ...string) {
 	if seriesID == "" || coverURL == "" {
 		return
 	}
+	metadataSource := metadataCoverPolicySource(firstMetadataSource(metadataSources), coverURL)
+	if err := ValidateMetadataCoverURL(metadataSource, coverURL); err != nil {
+		log.Printf("[metadata] Series cover rejected for %s: %v", seriesID, err)
+		return
+	}
 	coverURL = strings.Replace(coverURL, "http://", "https://", 1)
-	if err := store.UpdateSeriesMetadata(seriesID, store.SeriesMetadataUpdate{CoverURL: &coverURL}); err != nil {
-		log.Printf("[metadata] Series cover URL save failed for %s: %v", seriesID, err)
+	// 调用方在调度下载前已经把封面 URL 写库，这里只负责缓存。数据库里已经不是
+	// 这个 URL 时说明有更新的封面赢了，旧任务不能把它改回去。
+	if !seriesCoverURLIsCurrent(seriesID, coverURL) {
 		return
 	}
 
@@ -337,18 +513,37 @@ func DownloadSeriesCover(seriesID, coverURL string) {
 		return
 	}
 	cachePath := filepath.Join(thumbDir, archive.SeriesCoverCacheName(seriesID))
-	ch, loaded := seriesCoverDownload.LoadOrStore(seriesID, make(chan struct{}))
-	done := ch.(chan struct{})
-	if loaded {
-		<-done
+	key := seriesCoverKey(seriesID)
+	for {
+		state := &coverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+		activeValue, loaded := coverDownload.LoadOrStore(key, state)
+		if loaded {
+			active := activeValue.(*coverDownloadState)
+			<-active.done
+			if active.coverURL == coverURL {
+				return
+			}
+			// A different URL finished. Take the next slot so this request can
+			// replace it, unless the database says this request is now stale.
+			if !seriesCoverURLIsCurrent(seriesID, coverURL) {
+				return
+			}
+			continue
+		}
+
+		func() {
+			defer func() {
+				close(state.done)
+				coverDownload.Delete(key)
+			}()
+			downloadSeriesCoverToLocal(seriesID, coverURL, metadataSource, cachePath)
+		}()
 		return
 	}
-	defer func() {
-		close(done)
-		seriesCoverDownload.Delete(seriesID)
-	}()
+}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+func downloadSeriesCoverToLocal(seriesID, coverURL, metadataSource, cachePath string) {
+	client := metadataCoverHTTPClient(metadataSource)
 	req, err := http.NewRequest(http.MethodGet, coverURL, nil)
 	if err != nil {
 		return
@@ -370,11 +565,74 @@ func DownloadSeriesCover(seriesID, coverURL string) {
 	if err != nil {
 		return
 	}
+	lock := coverPublishLock(seriesCoverKey(seriesID))
+	lock.Lock()
+	defer lock.Unlock()
+	if !seriesCoverURLIsCurrent(seriesID, coverURL) {
+		// A newer cover won while this download was in flight.
+		return
+	}
 	archive.ClearSeriesCoverCache(seriesID)
 	if err := os.WriteFile(cachePath, webpData, 0644); err != nil {
 		return
 	}
 	log.Printf("[metadata] Series cover cached locally for %s", seriesID)
+}
+
+// ValidateMetadataCoverURL applies provider-specific trust rules before a
+// client-supplied metadata result can be persisted or fetched.
+func ValidateMetadataCoverURL(metadataSource, coverURL string) error {
+	if coverURL == "" || !isEHMetadataSource(metadataSource) {
+		return nil
+	}
+	if safeEHCoverURL(coverURL) == "" {
+		return fmt.Errorf("E-Hentai cover URL was rejected")
+	}
+	return nil
+}
+
+func metadataCoverHTTPClient(metadataSource string) *http.Client {
+	client := &http.Client{Timeout: 30 * time.Second}
+	if isEHMetadataSource(metadataSource) {
+		client.CheckRedirect = metadataCoverRedirectPolicy(metadataSource)
+	}
+	return client
+}
+
+func metadataCoverRedirectPolicy(metadataSource string) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("too many E-Hentai cover redirects")
+		}
+		if isEHMetadataSource(metadataSource) && safeEHCoverURL(req.URL.String()) == "" {
+			return fmt.Errorf("E-Hentai cover redirect was rejected")
+		}
+		return nil
+	}
+}
+
+func isEHMetadataSource(source string) bool {
+	return source == config.EHentaiSitePublic || source == config.EHentaiSiteRestricted
+}
+
+func metadataCoverPolicySource(metadataSource, coverURL string) string {
+	if isEHMetadataSource(metadataSource) {
+		return metadataSource
+	}
+	// Persisted cover rows do not retain provider context on every entity. An
+	// official EH image URL is sufficient to restore the strict redirect policy
+	// when a missing cache is rebuilt later.
+	if safeEHCoverURL(coverURL) != "" {
+		return config.EHentaiSitePublic
+	}
+	return metadataSource
+}
+
+func firstMetadataSource(sources []string) string {
+	if len(sources) == 0 {
+		return ""
+	}
+	return sources[0]
 }
 
 // ============================================================

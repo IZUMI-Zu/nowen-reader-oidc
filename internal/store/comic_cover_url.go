@@ -1,9 +1,11 @@
 package store
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nowen-reader/nowen-reader/internal/archive"
 	"github.com/nowen-reader/nowen-reader/internal/config"
@@ -30,25 +32,25 @@ func BuildComicCoverURL(comicID string) string {
 
 // BuildGroupCoverURL 构造合集封面缩略图 URL。
 // 复用 /api/comics/ 端点，ID 前缀为 "group_" 以区分漫画缩略图。
-func BuildGroupCoverURL(groupID int) string {
+// 版本号绑定数据库中的封面源和更新时间，因此新封面写入后无需等待
+// 异步缓存文件落盘，WebUI 就能立即使用不同的 URL 绕过浏览器缓存。
+func BuildGroupCoverURL(groupID int, storedCoverURL string, updatedAt time.Time) string {
 	coverID := fmt.Sprintf("group_%d", groupID)
 	base := config.JoinBasePath(fmt.Sprintf("/api/comics/%s/thumbnail", coverID))
-	tw := config.GetThumbnailWidth()
-	th := config.GetThumbnailHeight()
-	cacheName := fmt.Sprintf("group_%d_%dx%d.webp", groupID, tw, th)
-	cachePath := filepath.Join(config.GetThumbnailsDir(), cacheName)
-	if info, err := os.Stat(cachePath); err == nil {
-		return fmt.Sprintf("%s?v=%d", base, info.ModTime().Unix())
-	}
-	return base
+	version := sha256.Sum256([]byte(storedCoverURL + "\x00" + updatedAt.UTC().Format(time.RFC3339Nano)))
+	return fmt.Sprintf("%s?v=%x", base, version[:8])
 }
 
-func BuildSeriesCoverURL(seriesID string) string {
+// BuildSeriesCoverURL 构造目录作品封面缩略图 URL。版本号同时绑定数据库中的封面
+// 源和缓存文件的 mtime，因此封面换源后 URL 立即变化，不必等异步缓存落盘。
+func BuildSeriesCoverURL(seriesID, storedCoverURL string) string {
 	coverID := "series_" + seriesID
 	base := config.JoinBasePath(fmt.Sprintf("/api/comics/%s/thumbnail", coverID))
 	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.SeriesCoverCacheName(seriesID))
+	cachedAt := int64(0)
 	if info, err := os.Stat(cachePath); err == nil {
-		return fmt.Sprintf("%s?v=%d", base, info.ModTime().Unix())
+		cachedAt = info.ModTime().Unix()
 	}
-	return base
+	version := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d", storedCoverURL, cachedAt))
+	return fmt.Sprintf("%s?v=%x", base, version[:8])
 }

@@ -34,7 +34,34 @@ func SetSeriesTags(seriesID string, tagNames []string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM "ComicSeriesTag" WHERE "seriesId" = ?`, seriesID); err != nil {
+	if err := setSeriesTags(tx, seriesID, tagNames); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func setSeriesTags(database tagDatabase, seriesID string, tagNames []string) error {
+	rows, err := database.Query(`SELECT "tagId" FROM "ComicSeriesTag" WHERE "seriesId" = ?`, seriesID)
+	if err != nil {
+		return err
+	}
+	var previousTagIDs []int
+	for rows.Next() {
+		var tagID int
+		if err := rows.Scan(&tagID); err != nil {
+			rows.Close()
+			return err
+		}
+		previousTagIDs = append(previousTagIDs, tagID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := database.Exec(`DELETE FROM "ComicSeriesTag" WHERE "seriesId" = ?`, seriesID); err != nil {
 		return err
 	}
 	for _, rawName := range tagNames {
@@ -43,9 +70,9 @@ func SetSeriesTags(seriesID string, tagNames []string) error {
 			continue
 		}
 		var tagID int
-		err := tx.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID)
+		err := database.QueryRow(`SELECT "id" FROM "Tag" WHERE "name" = ?`, name).Scan(&tagID)
 		if err == sql.ErrNoRows {
-			result, createErr := tx.Exec(`INSERT INTO "Tag" ("name", "color") VALUES (?, '')`, name)
+			result, createErr := database.Exec(`INSERT INTO "Tag" ("name", "color") VALUES (?, '')`, name)
 			if createErr != nil {
 				return createErr
 			}
@@ -57,11 +84,16 @@ func SetSeriesTags(seriesID string, tagNames []string) error {
 		} else if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO "ComicSeriesTag" ("seriesId", "tagId") VALUES (?, ?)`, seriesID, tagID); err != nil {
+		if _, err := database.Exec(`INSERT OR IGNORE INTO "ComicSeriesTag" ("seriesId", "tagId") VALUES (?, ?)`, seriesID, tagID); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	for _, tagID := range previousTagIDs {
+		if err := deleteTagIfUnreferenced(database, tagID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func SyncSeriesTagsToItems(seriesID string) (total, synced, tagsCount int, err error) {
@@ -75,6 +107,11 @@ func SyncSeriesTagsToItems(seriesID string) (total, synced, tagsCount int, err e
 	}
 	names := make([]string, 0, len(tags))
 	for _, tag := range tags {
+		// Keep the series gallery identity on the series. Each member may map to
+		// a different EH/EX gallery and must retain its own source tag.
+		if IsEHentaiGallerySourceTag(tag.Name) {
+			continue
+		}
 		names = append(names, tag.Name)
 	}
 	for _, comicID := range ids {

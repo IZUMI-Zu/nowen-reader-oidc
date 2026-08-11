@@ -253,7 +253,7 @@ func GetAllGroupsWithOptions(opts GroupListOptions) ([]ComicGroupWithCount, erro
 		g.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 		// 封面 URL：优先自定义封面，否则使用第一个可见目录作品或散本的封面。
 		if g.CoverURL != "" {
-			g.CoverURL = BuildGroupCoverURL(g.ID)
+			g.CoverURL = BuildGroupCoverURL(g.ID, g.CoverURL, updatedAt)
 		} else if g.ComicCount > 0 {
 			var firstComicID string
 			coverVisibility, coverArgs := visibility("c_cover")
@@ -444,7 +444,7 @@ func GetGroupByIDWithOptions(groupID int, opts GroupDetailOptions) (*ComicGroupD
 			cRows.Close()
 			if len(sItem.Comics) > 0 {
 				if storedCoverURL != "" {
-					sItem.CoverURL = BuildSeriesCoverURL(sItem.SeriesID)
+					sItem.CoverURL = BuildSeriesCoverURL(sItem.SeriesID, storedCoverURL)
 				} else if coverVisible {
 					sItem.CoverURL = BuildComicCoverURL(sItem.CoverComicID)
 				} else {
@@ -473,7 +473,7 @@ func GetGroupByIDWithOptions(groupID int, opts GroupDetailOptions) (*ComicGroupD
 
 	// 封面 URL：有自定义封面时返回本地缓存路径，无封面时按优先使用 Series 目录作品或第一本漫画缩略图
 	if g.CoverURL != "" {
-		g.CoverURL = BuildGroupCoverURL(g.ID)
+		g.CoverURL = BuildGroupCoverURL(g.ID, g.CoverURL, updatedAt)
 	} else if len(g.SeriesList) > 0 && g.SeriesList[0].CoverURL != "" {
 		g.CoverURL = g.SeriesList[0].CoverURL
 	} else if len(g.Comics) > 0 {
@@ -588,6 +588,21 @@ func GetGroupStoredCoverURL(groupID int) (string, error) {
 	return coverURL, err
 }
 
+// UpdateGroupStoredCoverURLIfCurrent replaces a stored cover URL only when it
+// still matches the value observed by the caller. This prevents a delayed
+// download task from overwriting a newer metadata update.
+func UpdateGroupStoredCoverURLIfCurrent(groupID int, currentURL, nextURL string) (bool, error) {
+	result, err := db.Exec(`
+		UPDATE "ComicGroup" SET "coverUrl" = ?, "updatedAt" = ?
+		WHERE "id" = ? AND "coverUrl" = ?
+	`, nextURL, time.Now().UTC(), groupID, currentURL)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	return updated == 1, err
+}
+
 // GroupMetadataUpdate 系列元数据更新请求。
 type GroupMetadataUpdate struct {
 	Name        *string `json:"name"`
@@ -610,6 +625,28 @@ type GroupMetadataUpdate struct {
 
 // UpdateGroupMetadata 更新系列的元数据字段。
 func UpdateGroupMetadata(groupID int, update GroupMetadataUpdate) error {
+	return updateGroupMetadata(db, groupID, update)
+}
+
+// UpdateGroupMetadataAndTags commits the denormalized metadata fields and the
+// normalized group tag associations together, so the UI cannot observe a new
+// Genre with an old ComicGroupTag set (or the reverse).
+func UpdateGroupMetadataAndTags(groupID int, update GroupMetadataUpdate, tagNames []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateGroupMetadata(tx, groupID, update); err != nil {
+		return err
+	}
+	if err := setGroupTags(tx, groupID, tagNames); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateGroupMetadata(database tagDatabase, groupID int, update GroupMetadataUpdate) error {
 	var setClauses []string
 	var args []interface{}
 
@@ -678,7 +715,7 @@ func UpdateGroupMetadata(groupID int, update GroupMetadataUpdate) error {
 	args = append(args, time.Now().UTC())
 	args = append(args, groupID)
 
-	_, err := db.Exec(`UPDATE "ComicGroup" SET `+strings.Join(setClauses, ", ")+` WHERE "id" = ?`, args...)
+	_, err := database.Exec(`UPDATE "ComicGroup" SET `+strings.Join(setClauses, ", ")+` WHERE "id" = ?`, args...)
 	return err
 }
 

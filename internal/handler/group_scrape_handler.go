@@ -63,11 +63,50 @@ func (h *GroupHandler) ScrapeMetadata(c *gin.Context) {
 		ct = detectGroupContentType(group)
 	}
 
-	results := service.SearchMetadata(query, body.Sources, body.Lang, ct)
+	sources := filterSeriesMetadataSources(body.Sources, ct)
+	if len(body.Sources) > 0 && len(sources) == 0 {
+		c.JSON(http.StatusOK, gin.H{"results": []service.ComicMetadata{}, "detectedContentType": ct})
+		return
+	}
+	options, err := groupMetadataSearchOptions(id, sources, query, group.Name)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取合集标签失败"})
+		return
+	}
+	results := searchMetadataWithOptionsContext(c.Request.Context(), query, sources, body.Lang, options, ct)
 	if results == nil {
 		results = []service.ComicMetadata{}
 	}
 	c.JSON(http.StatusOK, gin.H{"results": results, "detectedContentType": ct})
+}
+
+// searchReusesStoredGallery 判断这次搜索是否还能复用已存的 EH 画廊标签。用户改写
+// 搜索词通常正是为了纠正上一次选错的画廊，此时必须按新词重新搜索。
+func searchReusesStoredGallery(query, storedTitle string) bool {
+	return strings.TrimSpace(query) == strings.TrimSpace(storedTitle)
+}
+
+func groupMetadataSearchOptions(groupID int, sources []string, query, storedTitle string) (service.MetadataSearchOptions, error) {
+	if !includesMetadataSource(sources, "ehentai") || !searchReusesStoredGallery(query, storedTitle) {
+		return service.MetadataSearchOptions{}, nil
+	}
+	tags, err := store.GetGroupTags(groupID)
+	if err != nil {
+		return service.MetadataSearchOptions{}, err
+	}
+	return metadataSearchOptionsForTags(sources, tags, query, storedTitle), nil
+}
+
+func metadataSearchOptionsForTags(sources []string, tags []store.Tag, query, storedTitle string) service.MetadataSearchOptions {
+	options := service.MetadataSearchOptions{}
+	if !includesMetadataSource(sources, "ehentai") || !searchReusesStoredGallery(query, storedTitle) {
+		return options
+	}
+	options.EHentaiExistingTags = make([]string, 0, len(tags))
+	for _, tag := range tags {
+		options.EHentaiExistingTags = append(options.EHentaiExistingTags, tag.Name)
+	}
+	return options
 }
 
 // POST /api/groups/:id/apply-metadata — 将刮削结果应用到系列元数据
@@ -112,6 +151,12 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 
 	shouldApply := func(field string) bool {
 		return applyAll || fieldsSet[field]
+	}
+	if meta.CoverURL != "" && shouldApply("cover") {
+		if err := service.ValidateMetadataCoverURL(meta.Source, meta.CoverURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "封面地址不符合所选元数据源的安全规则"})
+			return
+		}
 	}
 
 	update := store.GroupMetadataUpdate{}
@@ -165,48 +210,71 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 		update.ExternalRatingUpdatedAt = &now
 	}
 
-	if err := store.UpdateGroupMetadata(id, update); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用元数据失败"})
-		return
-	}
-
-	// 处理标签
+	// Resolve the final normalized tag set before writing. Metadata fields and
+	// ComicGroupTag are then committed atomically by the store.
+	var mergedTags []string
+	applyTags := false
 	if meta.Genre != "" && shouldApply("tags") {
 		genres := splitAndTrim(meta.Genre)
 		if len(genres) > 0 {
-			existingTags, _ := store.GetGroupTags(id)
-			existingNames := make(map[string]bool)
+			existingTags, err := store.GetGroupTags(id)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "读取现有标签失败"})
+				return
+			}
+			existingNames := make([]string, 0, len(existingTags))
 			for _, t := range existingTags {
-				existingNames[t.Name] = true
+				existingNames = append(existingNames, t.Name)
 			}
-			allNames := make([]string, 0)
-			for _, t := range existingTags {
-				allNames = append(allNames, t.Name)
-			}
-			for _, g := range genres {
-				if !existingNames[g] {
-					allNames = append(allNames, g)
-				}
-			}
-			_ = store.SetGroupTags(id, allNames)
-			if body.SyncTags && allowMemberSync {
-				_, _, _, _ = store.SyncGroupTagsToVolumes(id)
-			}
+			mergedTags = mergeMetadataTags(existingNames, genres, update.Genre != nil)
+			applyTags = true
 		}
 	}
-
-	// 下载封面
-	if meta.CoverURL != "" && shouldApply("cover") {
-		go service.DownloadGroupCover(id, meta.CoverURL)
+	var updateErr error
+	if applyTags {
+		updateErr = store.UpdateGroupMetadataAndTags(id, update, mergedTags)
+	} else {
+		updateErr = store.UpdateGroupMetadata(id, update)
+	}
+	if updateErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用元数据失败"})
+		return
+	}
+	if update.CoverURL != nil {
+		service.ScheduleGroupCoverRefresh(id, *update.CoverURL, meta.Source)
+	}
+	if applyTags && body.SyncTags && allowMemberSync {
+		total, synced, _, err := store.SyncGroupTagsToVolumes(id)
+		if err != nil || synced != total {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "合集标签已保存，但同步成员标签失败",
+				"syncSuccess": synced,
+				"syncErrors":  total - synced,
+			})
+			return
+		}
 	}
 
 	// 同步元数据到所有卷
 	var syncSuccess, syncErrors int
 	if body.SyncToVolumes && allowMemberSync {
-		syncSuccess, syncErrors, _ = syncGroupMetadataToVolumes(id, meta, fieldsSet, body.Overwrite, body.SyncRating)
+		var syncErr error
+		syncSuccess, syncErrors, syncErr = syncGroupMetadataToVolumes(id, meta, fieldsSet, body.Overwrite, body.SyncRating)
+		if syncErr != nil || syncErrors > 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "合集元数据已保存，但同步成员字段失败",
+				"syncSuccess": syncSuccess,
+				"syncErrors":  syncErrors,
+			})
+			return
+		}
 	}
 
-	updated, _ := store.GetGroupByID(id)
+	updated, err := store.GetGroupByID(id)
+	if err != nil || updated == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "合集元数据已保存，但刷新详情失败"})
+		return
+	}
 	resp := gin.H{"success": true, "group": updated}
 	if body.SyncToVolumes && allowMemberSync {
 		resp["syncSuccess"] = syncSuccess
@@ -256,7 +324,9 @@ func syncMetadataToComicIDs(comicIDs []string, meta service.ComicMetadata, field
 			updates["language"] = meta.Language
 		}
 		if meta.Genre != "" && shouldApply("genre") {
-			updates["genre"] = meta.Genre
+			if genre := metadataGenreForMemberSync(meta.Genre); genre != "" {
+				updates["genre"] = genre
+			}
 		}
 		if meta.Description != "" && shouldApply("description") {
 			updates["description"] = meta.Description
@@ -284,6 +354,17 @@ func syncMetadataToComicIDs(comicIDs []string, meta service.ComicMetadata, field
 		}
 	}
 	return successCount, errorCount, nil
+}
+
+func metadataGenreForMemberSync(genre string) string {
+	tags := splitAndTrim(genre)
+	filtered := tags[:0]
+	for _, tag := range tags {
+		if !service.IsEHentaiGallerySourceTag(tag) {
+			filtered = append(filtered, tag)
+		}
+	}
+	return strings.Join(filtered, ", ")
 }
 
 // filterEmptyFieldsOnly 过滤掉漫画中已有值的字段，只保留空字段的更新
@@ -468,6 +549,49 @@ func splitAndTrim(s string) []string {
 		if p != "" {
 			result = append(result, p)
 		}
+	}
+	return result
+}
+
+// mergeMetadataTags 合并现有标签与本次刮削结果。genreApplied 为 false 时（genre
+// 字段这次没写入），gallery 身份必须停在旧画廊：既不接收新的 EH source: 标签，
+// 也不删除旧的，否则展示的 genre 文本和搜索直达的画廊会是两个。
+func mergeMetadataTags(existing, incoming []string, genreApplied bool) []string {
+	replaceEHSource := false
+	if genreApplied {
+		for _, name := range incoming {
+			if service.IsEHentaiGallerySourceTag(name) {
+				replaceEHSource = true
+				break
+			}
+		}
+	}
+
+	result := make([]string, 0, len(existing)+len(incoming))
+	seen := make(map[string]struct{}, len(existing)+len(incoming))
+	appendUnique := func(name string) {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, name)
+	}
+	for _, name := range existing {
+		if replaceEHSource && service.IsEHentaiGallerySourceTag(name) {
+			continue
+		}
+		appendUnique(name)
+	}
+	for _, name := range incoming {
+		if !genreApplied && service.IsEHentaiGallerySourceTag(name) {
+			continue
+		}
+		appendUnique(name)
 	}
 	return result
 }

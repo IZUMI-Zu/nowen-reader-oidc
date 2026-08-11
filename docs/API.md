@@ -463,7 +463,7 @@ Content-Type: application/json
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/tags` | 标签列表 |
+| GET | `/api/tags` | 标签列表；`scope=comics` 仅返回可用于漫画列表筛选的 `ComicTag`。管理员省略 scope 时返回漫画、合集与目录作品的全局标签，普通用户始终受可访问书库与 `ComicTag` 范围限制 |
 | PUT | `/api/tags/color` | 更新标签颜色 🔒管理员 |
 | PUT | `/api/tags/rename` | 重命名标签 🔒管理员 |
 | DELETE | `/api/tags` | 删除标签 🔒管理员 |
@@ -685,6 +685,7 @@ Content-Type: application/json
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
 | GET/POST | `/api/metadata/search` | 搜索元数据 |
+| GET/PUT | `/api/metadata/ehentai/settings` | EH/EX 非敏感设置与脱敏凭据状态 🔒管理员 |
 | POST | `/api/metadata/apply` | 应用元数据 |
 | POST | `/api/metadata/scan` | 扫描 ComicInfo.xml |
 | POST | `/api/metadata/novel-scan` | 扫描小说元数据 |

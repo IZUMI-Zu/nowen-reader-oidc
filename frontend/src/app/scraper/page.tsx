@@ -47,6 +47,7 @@ import { useTranslation } from "@/lib/i18n";
 import { useAuth } from "@/lib/auth-context";
 import { apiPath } from "@/lib/base-path";
 import { useAIStatus } from "@/hooks/useAIStatus";
+import { useEHentaiSettings } from "@/hooks/useEHentaiSettings";
 import { useScraperStore } from "@/hooks/useScraperStore";
 import { GroupMetadataSearch } from "@/components/GroupMetadataSearch";
 import GroupDetailPanel from "@/components/GroupDetailPanel";
@@ -264,7 +265,18 @@ export default function ScraperPage() {
 
   const isAdmin = user?.role === "admin";
   const { aiConfigured } = useAIStatus();
+  const { settings: ehentaiSettings } = useEHentaiSettings();
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
+
+  useEffect(() => {
+    if (
+      ehentaiSettings &&
+      (!ehentaiSettings.enabled || !ehentaiSettings.configurationValid) &&
+      groupBatchScrapeSources.includes("ehentai")
+    ) {
+      toggleGroupBatchScrapeSource("ehentai");
+    }
+  }, [ehentaiSettings, groupBatchScrapeSources]);
 
   // 首次挂载加载
   useEffect(() => {
@@ -1969,20 +1981,23 @@ export default function ScraperPage() {
                     { id: "mangadex", name: "MangaDex", icon: "📖" },
                     { id: "mangaupdates", name: "MangaUpdates", icon: "📋" },
                     { id: "kitsu", name: "Kitsu", icon: "🦊" },
-                  ].map((src) => (
-                    <button
-                      key={src.id}
-                      onClick={() => toggleGroupBatchScrapeSource(src.id)}
-                      className={`px-2.5 py-1 rounded-lg text-xs flex items-center gap-1 transition-colors ${
-                        groupBatchScrapeSources.includes(src.id)
-                          ? "bg-accent/20 text-accent ring-1 ring-accent/30"
-                          : "bg-card-hover text-muted opacity-50"
-                      }`}
-                    >
-                      <span>{src.icon}</span>
-                      <span>{src.name}</span>
-                    </button>
-                  ))}
+                    { id: "ehentai", name: "E-Hentai / ExHentai", icon: "🔞" },
+                  ]
+                    .filter((src) => src.id !== "ehentai" || (ehentaiSettings?.enabled && ehentaiSettings.configurationValid))
+                    .map((src) => (
+                      <button
+                        key={src.id}
+                        onClick={() => toggleGroupBatchScrapeSource(src.id)}
+                        className={`px-2.5 py-1 rounded-lg text-xs flex items-center gap-1 transition-colors ${
+                          groupBatchScrapeSources.includes(src.id)
+                            ? "bg-accent/20 text-accent ring-1 ring-accent/30"
+                            : "bg-card-hover text-muted opacity-50"
+                        }`}
+                      >
+                        <span>{src.icon}</span>
+                        <span>{src.name}</span>
+                      </button>
+                    ))}
                 </div>
               </div>
 
@@ -2119,6 +2134,16 @@ export default function ScraperPage() {
                               <div className="flex gap-1.5">
                                 <span className="text-muted/50 w-10 flex-shrink-0">简介</span>
                                 <span className="text-foreground/70 line-clamp-1">{item.metadata.description}</span>
+                              </div>
+                            )}
+                            {item.metadata.externalRating != null && groupBatchScrapeFields.has("rating") && (
+                              <div className="flex gap-1.5">
+                                <span className="text-muted/50 w-10 flex-shrink-0">评分</span>
+                                <span className="text-foreground/70">
+                                  {item.metadata.externalRating}
+                                  {item.metadata.externalRatingMax != null && ` / ${item.metadata.externalRatingMax}`}
+                                  {item.metadata.externalRatingSource && ` (${item.metadata.externalRatingSource})`}
+                                </span>
                               </div>
                             )}
                           </div>

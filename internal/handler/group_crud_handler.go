@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nowen-reader/nowen-reader/internal/archive"
 	"github.com/nowen-reader/nowen-reader/internal/service"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
@@ -104,41 +103,8 @@ func (h *GroupHandler) GetGroup(c *gin.Context) {
 		return
 	}
 
-	uid := getUserID(c)
-	options := store.GroupDetailOptions{UserID: uid, ContentType: c.Query("contentType")}
-	user, userErr := store.GetUserByID(uid)
-	if userErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取用户权限失败"})
-		return
-	}
-	if user == nil || user.Role != "admin" {
-		options.FilterLibraryIDs = true
-		options.LibraryIDs, err = store.GetUserAccessibleLibraryIDs(uid)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取书库权限失败"})
-			return
-		}
-		if len(options.LibraryIDs) == 0 {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
-			return
-		}
-	}
-
-	group, err := store.GetGroupByIDWithOptions(id, options)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取分组详情失败"})
-		return
-	}
-	if group == nil {
-		if options.FilterLibraryIDs {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
-		} else {
-			c.JSON(http.StatusNotFound, gin.H{"error": "分组不存在"})
-		}
-		return
-	}
-	if options.FilterLibraryIDs && group.ComicCount == 0 {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
+	group, ok := visibleGroupDetail(c, id, c.Query("contentType"))
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, group)
@@ -205,7 +171,7 @@ func (h *GroupHandler) UpdateGroup(c *gin.Context) {
 
 	// 如果提供了外部封面 URL，触发异步下载到本地缓存
 	if body.CoverURL != "" && (strings.HasPrefix(body.CoverURL, "http://") || strings.HasPrefix(body.CoverURL, "https://")) {
-		go service.DownloadGroupCover(id, body.CoverURL)
+		service.ScheduleGroupCoverRefresh(id, body.CoverURL)
 	}
 
 	// 如果有元数据字段，也一并更新
@@ -243,7 +209,7 @@ func (h *GroupHandler) DeleteGroup(c *gin.Context) {
 	}
 
 	// 清理本地封面缓存
-	archive.ClearGroupCoverCache(id)
+	service.ClearGroupCoverCache(id)
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
@@ -467,7 +433,7 @@ func (h *GroupHandler) BatchDelete(c *gin.Context) {
 
 	// 清理本地封面缓存
 	for _, gid := range body.GroupIDs {
-		archive.ClearGroupCoverCache(gid)
+		service.ClearGroupCoverCache(gid)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "deleted": deleted})

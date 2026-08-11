@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nowen-reader/nowen-reader/internal/model"
@@ -373,6 +374,59 @@ func TestTagOperations(t *testing.T) {
 	tags, _ = GetAllTags()
 	if len(tags) != 2 {
 		t.Errorf("Expected 2 tags after remove, got %d", len(tags))
+	}
+
+	if err := AddTagsToComic("tag-test-1", []string{
+		"source:http://e-hentai.org/g/1/0123456789",
+		"source:https://example.com/item/keep-me",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddTagsToComicReplacingMatching("tag-test-1", []string{"source:https://exhentai.org/g/2/abcdef0123", "artist:fixture"}, IsEHentaiGallerySourceTag); err != nil {
+		t.Fatal(err)
+	}
+	comic, err := GetComicByID("tag-test-1")
+	if err != nil || comic == nil {
+		t.Fatalf("GetComicByID() error = %v", err)
+	}
+	var sourceTags int
+	var nonEHSourcePreserved bool
+	for _, tag := range comic.Tags {
+		if strings.HasPrefix(tag.Name, "source:") {
+			sourceTags++
+			if tag.Name == "source:https://example.com/item/keep-me" {
+				nonEHSourcePreserved = true
+			} else if tag.Name != "source:https://exhentai.org/g/2/abcdef0123" {
+				t.Fatalf("stale EH source tag remained after provider replacement: %q", tag.Name)
+			}
+		}
+	}
+	if sourceTags != 2 || !nonEHSourcePreserved {
+		t.Fatalf("source tags = %d, non-EH preserved = %v", sourceTags, nonEHSourcePreserved)
+	}
+}
+
+func TestIsEHentaiGallerySourceTag(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+		want bool
+	}{
+		{name: "public https", tag: "source:https://e-hentai.org/g/1/0123456789", want: true},
+		{name: "restricted http legacy", tag: "source:http://exhentai.org/g/2/abcdef0123", want: true},
+		{name: "scheme omitted legacy", tag: "source:e-hentai.org/g/3/ABCDEF0123", want: true},
+		{name: "other provider", tag: "source:https://example.com/item/1", want: false},
+		{name: "host suffix attack", tag: "source:https://e-hentai.org.example.com/g/1/0123456789", want: false},
+		{name: "nonstandard port", tag: "source:https://e-hentai.org:8443/g/1/0123456789", want: false},
+		{name: "query", tag: "source:https://e-hentai.org/g/1/0123456789?next=evil", want: false},
+		{name: "invalid token", tag: "source:https://e-hentai.org/g/1/not-a-token", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsEHentaiGallerySourceTag(tt.tag); got != tt.want {
+				t.Fatalf("IsEHentaiGallerySourceTag(%q) = %v, want %v", tt.tag, got, tt.want)
+			}
+		})
 	}
 }
 

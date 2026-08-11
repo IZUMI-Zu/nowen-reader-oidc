@@ -97,8 +97,6 @@ func checkLibraryManageAccess(c *gin.Context, libraryID string) error {
 
 type ImageHandler struct{}
 
-const contextKeyPrivateImageCache = "private_image_cache"
-
 // NewImageHandler creates a new ImageHandler.
 func NewImageHandler() *ImageHandler {
 	return &ImageHandler{}
@@ -246,7 +244,8 @@ func (h *ImageHandler) GetPageImage(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", result.MimeType)
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Content-Length", strconv.Itoa(len(result.Data)))
 	c.Header("ETag", etag)
 	c.Data(http.StatusOK, result.MimeType, result.Data)
@@ -301,12 +300,9 @@ func (h *ImageHandler) GetThumbnail(c *gin.Context) {
 			strconv.FormatInt(stat.Size(), 36),
 		)
 	}
-	cacheControl := "public, max-age=300, must-revalidate"
-	if c.GetBool(contextKeyPrivateImageCache) {
-		cacheControl = "private, max-age=300, must-revalidate"
-		c.Header("Vary", "Authorization, Cookie")
-	}
-	c.Header("Cache-Control", cacheControl)
+	// 缩略图路由要求登录且按书库权限过滤，共享缓存不能跨用户复用它。
+	c.Header("Cache-Control", "private, max-age=300, must-revalidate")
+	c.Header("Vary", "Authorization, Cookie")
 
 	// Check If-None-Match for 304
 	if c.GetHeader("If-None-Match") == etag {
@@ -332,32 +328,13 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 		return
 	}
 
-	group, err := store.GetGroupByID(groupID)
-	if err != nil || group == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "合集不存在"})
+	group, ok := visibleGroupDetail(c, groupID, "")
+	if !ok {
 		return
 	}
 
-	// 尝试读取本地缓存
 	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.GroupCoverCacheName(groupID))
-	if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-		etag := fmt.Sprintf(`"%d"`, len(data))
-		if stat, err := os.Stat(cachePath); err == nil {
-			etag = fmt.Sprintf(`"%s-%s"`,
-				strconv.FormatInt(stat.ModTime().UnixMilli(), 36),
-				strconv.FormatInt(stat.Size(), 36),
-			)
-		}
-		if c.GetHeader("If-None-Match") == etag {
-			c.Header("ETag", etag)
-			c.Status(http.StatusNotModified)
-			return
-		}
-		c.Header("Content-Type", http.DetectContentType(data))
-		c.Header("Cache-Control", "public, max-age=300, must-revalidate")
-		c.Header("Content-Length", strconv.Itoa(len(data)))
-		c.Header("ETag", etag)
-		c.Data(http.StatusOK, c.Writer.Header().Get("Content-Type"), data)
+	if serveCachedMetadataCover(c, cachePath) {
 		return
 	}
 
@@ -366,13 +343,24 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 	if err == nil && rawCoverURL != "" {
 		switch {
 		case strings.HasPrefix(rawCoverURL, "http://") || strings.HasPrefix(rawCoverURL, "https://"):
-			go service.DownloadGroupCover(groupID, rawCoverURL)
+			if service.ValidateMetadataCoverURL(config.EHentaiSitePublic, rawCoverURL) == nil {
+				awaitInlineCoverFetch(func() {
+					service.EnsureGroupCoverCached(groupID, rawCoverURL, config.EHentaiSitePublic)
+				})
+				if serveCachedMetadataCover(c, cachePath) {
+					return
+				}
+				c.JSON(http.StatusBadGateway, gin.H{"error": "EH/EX 合集封面下载失败"})
+				return
+			}
+			go service.EnsureGroupCoverCached(groupID, rawCoverURL)
+			setPrivateMetadataCoverRedirect(c)
+			c.Header("Referrer-Policy", "no-referrer")
 			c.Redirect(http.StatusTemporaryRedirect, rawCoverURL)
 			return
 		case strings.HasPrefix(rawCoverURL, "data:image/"):
 			if err := service.CacheGroupCoverDataURL(groupID, rawCoverURL); err == nil {
-				if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-					c.Data(http.StatusOK, http.DetectContentType(data), data)
+				if serveCachedMetadataCover(c, cachePath) {
 					return
 				}
 			}
@@ -380,6 +368,7 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 	}
 
 	if group.CoverURL != "" && !strings.HasPrefix(group.CoverURL, "/api/comics/group_") {
+		setPrivateMetadataCoverRedirect(c)
 		c.Redirect(http.StatusTemporaryRedirect, group.CoverURL)
 		return
 	}
@@ -388,6 +377,7 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 	if len(group.Comics) > 0 {
 		firstCover := group.Comics[0].CoverURL
 		if firstCover != "" {
+			setPrivateMetadataCoverRedirect(c)
 			c.Redirect(http.StatusTemporaryRedirect, firstCover)
 			return
 		}
@@ -409,38 +399,120 @@ func (h *ImageHandler) serveSeriesCoverThumbnail(c *gin.Context, seriesID string
 	}
 
 	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.SeriesCoverCacheName(seriesID))
-	if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-		etag := fmt.Sprintf(`"%d"`, len(data))
-		if stat, err := os.Stat(cachePath); err == nil {
-			etag = fmt.Sprintf(`"%s-%s"`,
-				strconv.FormatInt(stat.ModTime().UnixMilli(), 36),
-				strconv.FormatInt(stat.Size(), 36),
-			)
-		}
-		if c.GetHeader("If-None-Match") == etag {
-			c.Header("ETag", etag)
-			c.Status(http.StatusNotModified)
-			return
-		}
-		c.Header("Content-Type", http.DetectContentType(data))
-		c.Header("Cache-Control", "public, max-age=300, must-revalidate")
-		c.Header("Content-Length", strconv.Itoa(len(data)))
-		c.Header("ETag", etag)
-		c.Data(http.StatusOK, c.Writer.Header().Get("Content-Type"), data)
+	if serveCachedMetadataCover(c, cachePath) {
 		return
 	}
 
 	rawCoverURL, err := store.GetSeriesStoredCoverURL(seriesID)
 	if err == nil && (strings.HasPrefix(rawCoverURL, "http://") || strings.HasPrefix(rawCoverURL, "https://")) {
+		if service.ValidateMetadataCoverURL(config.EHentaiSitePublic, rawCoverURL) == nil {
+			awaitInlineCoverFetch(func() {
+				service.DownloadSeriesCover(seriesID, rawCoverURL, config.EHentaiSitePublic)
+			})
+			if serveCachedMetadataCover(c, cachePath) {
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": "EH/EX 目录作品封面下载失败"})
+			return
+		}
 		go service.DownloadSeriesCover(seriesID, rawCoverURL)
+		setPrivateMetadataCoverRedirect(c)
+		c.Header("Referrer-Policy", "no-referrer")
 		c.Redirect(http.StatusTemporaryRedirect, rawCoverURL)
 		return
 	}
 	if detail.Series.CoverComicID != "" {
+		setPrivateMetadataCoverRedirect(c)
 		c.Redirect(http.StatusTemporaryRedirect, store.BuildComicCoverURL(detail.Series.CoverComicID))
 		return
 	}
 	c.JSON(http.StatusNotFound, gin.H{"error": "目录作品封面不可用"})
+}
+
+func serveCachedMetadataCover(c *gin.Context, cachePath string) bool {
+	data, err := os.ReadFile(cachePath)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	etag := fmt.Sprintf(`"%d"`, len(data))
+	if stat, err := os.Stat(cachePath); err == nil {
+		etag = fmt.Sprintf(`"%s-%s"`,
+			strconv.FormatInt(stat.ModTime().UnixMilli(), 36),
+			strconv.FormatInt(stat.Size(), 36),
+		)
+	}
+	c.Header("Cache-Control", "private, max-age=300, must-revalidate")
+	c.Header("Vary", "Authorization, Cookie")
+	if c.GetHeader("If-None-Match") == etag {
+		c.Header("ETag", etag)
+		c.Status(http.StatusNotModified)
+		return true
+	}
+	contentType := http.DetectContentType(data)
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Length", strconv.Itoa(len(data)))
+	c.Header("ETag", etag)
+	c.Data(http.StatusOK, contentType, data)
+	return true
+}
+
+// visibleGroupDetail 读取调用者有权看到的合集详情，无权限时直接写响应并返回 false。
+func visibleGroupDetail(c *gin.Context, groupID int, contentType string) (*store.ComicGroupDetail, bool) {
+	uid := getUserID(c)
+	options := store.GroupDetailOptions{UserID: uid, ContentType: contentType}
+	user, err := store.GetUserByID(uid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取用户权限失败"})
+		return nil, false
+	}
+	if user == nil || user.Role != "admin" {
+		options.FilterLibraryIDs = true
+		options.LibraryIDs, err = store.GetUserAccessibleLibraryIDs(uid)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取书库权限失败"})
+			return nil, false
+		}
+		if len(options.LibraryIDs) == 0 {
+			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
+			return nil, false
+		}
+	}
+
+	group, err := store.GetGroupByIDWithOptions(groupID, options)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取合集详情失败"})
+		return nil, false
+	}
+	if group == nil || (options.FilterLibraryIDs && group.ComicCount == 0) {
+		if options.FilterLibraryIDs {
+			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
+		} else {
+			c.JSON(http.StatusNotFound, gin.H{"error": "合集不存在"})
+		}
+		return nil, false
+	}
+	return group, true
+}
+
+// inlineCoverFetchTimeout 限制请求线程等待封面下载的时间。超时后下载在后台继续，
+// 浏览器下一次请求就能命中缓存，而不是让一屏冷封面各占一个协程等满 30 秒。
+var inlineCoverFetchTimeout = 8 * time.Second
+
+func awaitInlineCoverFetch(fetch func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fetch()
+	}()
+	select {
+	case <-done:
+	case <-time.After(inlineCoverFetchTimeout):
+	}
+}
+
+func setPrivateMetadataCoverRedirect(c *gin.Context) {
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("Vary", "Authorization, Cookie")
 }
 
 // ============================================================
@@ -695,7 +767,8 @@ func (h *ImageHandler) GetPdfFile(c *gin.Context) {
 	c.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 	c.Header("Content-Disposition", "inline") // 防止微信浏览器触发下载
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Header("Cache-Control", "public, max-age=86400")
+	c.Header("Cache-Control", "private, max-age=86400")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Accept-Ranges", "bytes")
 
 	// 支持 Range 请求（PDF.js 需要）
@@ -787,7 +860,8 @@ func (h *ImageHandler) GetEpubResource(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", result.MimeType)
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Content-Length", strconv.Itoa(len(result.Data)))
 	c.Header("ETag", etag)
 	c.Data(http.StatusOK, result.MimeType, result.Data)
@@ -925,7 +999,8 @@ func (h *ImageHandler) GetEmbeddedImage(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", img.MimeType)
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	c.Header("Vary", "Authorization, Cookie")
 	c.Header("Content-Length", strconv.Itoa(len(img.Data)))
 	c.Header("ETag", etag)
 	c.Data(http.StatusOK, img.MimeType, img.Data)

@@ -295,7 +295,6 @@ func ReplaceDetectedSeries(libraryID string, detected []DetectedSeries) error {
 	`, libraryID, libraryID, libraryID); err != nil {
 		return err
 	}
-
 	return tx.Commit()
 }
 
@@ -376,7 +375,7 @@ func seriesSummaryByID(id, userID string) (*SeriesSummary, error) {
 		_ = db.QueryRow(`SELECT "comicId" FROM "ComicSeriesItem" WHERE "seriesId" = ? ORDER BY "sortIndex", "comicId" LIMIT 1`, id).Scan(&summary.CoverComicID)
 	}
 	if storedCoverURL != "" {
-		summary.CoverURL = BuildSeriesCoverURL(id)
+		summary.CoverURL = BuildSeriesCoverURL(id, storedCoverURL)
 	} else if summary.CoverComicID != "" {
 		summary.CoverURL = BuildComicCoverURL(summary.CoverComicID)
 	}
@@ -712,6 +711,27 @@ type SeriesMetadataUpdate struct {
 }
 
 func UpdateSeriesMetadata(id string, update SeriesMetadataUpdate) error {
+	return updateSeriesMetadata(db, id, update)
+}
+
+// UpdateSeriesMetadataAndTags keeps the series Genre field and normalized tag
+// rows in one transaction.
+func UpdateSeriesMetadataAndTags(id string, update SeriesMetadataUpdate, tagNames []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateSeriesMetadata(tx, id, update); err != nil {
+		return err
+	}
+	if err := setSeriesTags(tx, id, tagNames); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateSeriesMetadata(database tagDatabase, id string, update SeriesMetadataUpdate) error {
 	sets := []string{`"updatedAt" = CURRENT_TIMESTAMP`}
 	args := []interface{}{}
 	appendValue := func(column string, value interface{}) {
@@ -766,7 +786,7 @@ func UpdateSeriesMetadata(id string, update SeriesMetadataUpdate) error {
 		appendValue("manualLocked", *update.ManualLocked)
 	}
 	args = append(args, id)
-	_, err := db.Exec(`UPDATE "ComicSeries" SET `+strings.Join(sets, ", ")+` WHERE "id" = ?`, args...)
+	_, err := database.Exec(`UPDATE "ComicSeries" SET `+strings.Join(sets, ", ")+` WHERE "id" = ?`, args...)
 	return err
 }
 

@@ -76,6 +76,12 @@ services:
       # - OIDC_AUTO_PROVISION=false
       # - OIDC_BOOTSTRAP_ADMIN_SUBJECTS=
       # - OIDC_SESSION_MAX_AGE=12h
+      # E-Hentai / ExHentai 元数据（开关和非敏感选项在管理员 WebUI 配置）
+      # Cookie 仅通过受保护的环境变量注入，勿提交 Git
+      # - EHENTAI_IPB_MEMBER_ID=${EHENTAI_IPB_MEMBER_ID:-}
+      # - EHENTAI_IPB_PASS_HASH=${EHENTAI_IPB_PASS_HASH:-}
+      # - EHENTAI_STAR=${EHENTAI_STAR:-}
+      # - EHENTAI_IGNEOUS=${EHENTAI_IGNEOUS:-}
       # 文件权限映射（设置为你 NAS/宿主机文件的 UID:GID，解决 permission denied 问题）
       # 可通过 ls -ln 查看文件的 UID/GID，然后填入下方
       # - PUID=1000

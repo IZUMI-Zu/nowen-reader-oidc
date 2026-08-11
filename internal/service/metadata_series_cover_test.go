@@ -159,6 +159,38 @@ func TestDownloadSeriesCoverSkipsPublishAfterStoredURLChanged(t *testing.T) {
 	}
 }
 
+// 换封面后旧缓存必须在调度返回前就失效，否则新版本号会命中旧图片文件，
+// 远端下载再失败的话旧封面就永久留下了。
+func TestScheduleSeriesCoverRefreshClearsOldCacheBeforeReturning(t *testing.T) {
+	const seriesID = "series-cover-refresh"
+	coverB := "https://ul.ehgt.org/b.png"
+	setupSeriesCoverTest(t, seriesID, coverB)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	fetched := make(chan struct{})
+	var fetchOnce sync.Once
+	stubGroupCoverTransport(t, func(req *http.Request) (*http.Response, error) {
+		fetchOnce.Do(func() { close(fetched) })
+		<-release
+		return imageResponse(req, solidPNG(t, color.RGBA{B: 255, A: 255})), nil
+	})
+
+	thumbDir := config.GetThumbnailsDir()
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(thumbDir, archive.SeriesCoverCacheName(seriesID))
+	if err := os.WriteFile(cachePath, []byte("old cached cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ScheduleSeriesCoverRefresh(seriesID, coverB, config.EHentaiSitePublic)
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("old series cover cache still existed when refresh scheduling returned: %v", err)
+	}
+	waitGroupCoverTestTask(t, "series cover refresh fetch", fetched)
+}
+
 func setupSeriesCoverTest(t *testing.T, seriesID, coverURL string) {
 	t.Helper()
 	t.Setenv("DATA_DIR", t.TempDir())

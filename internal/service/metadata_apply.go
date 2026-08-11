@@ -477,6 +477,21 @@ func CacheGroupCoverDataURL(groupID int, coverDataURL string) error {
 	return nil
 }
 
+// ClearSeriesCoverCache 与远端发布串行，避免在飞的旧任务重建刚清掉的封面。
+func ClearSeriesCoverCache(seriesID string) {
+	lock := coverPublishLock(seriesCoverKey(seriesID))
+	lock.Lock()
+	defer lock.Unlock()
+	archive.ClearSeriesCoverCache(seriesID)
+}
+
+// ScheduleSeriesCoverRefresh 在返回前作废浏览器可见的旧缓存，再异步刷新。
+// 调用方必须先把新封面 URL 提交到数据库。
+func ScheduleSeriesCoverRefresh(seriesID, coverURL string, metadataSources ...string) {
+	ClearSeriesCoverCache(seriesID)
+	go DownloadSeriesCover(seriesID, coverURL, metadataSources...)
+}
+
 func DownloadSeriesCover(seriesID, coverURL string, metadataSources ...string) {
 	if seriesID == "" || coverURL == "" {
 		return

@@ -182,7 +182,7 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 		}
 	}
 	if meta.CoverURL != "" && shouldApply("cover") {
-		go service.DownloadSeriesCover(detail.Series.ID, meta.CoverURL, meta.Source)
+		service.ScheduleSeriesCoverRefresh(detail.Series.ID, meta.CoverURL, meta.Source)
 	}
 
 	var syncSuccess, syncErrors int

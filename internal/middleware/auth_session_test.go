@@ -113,3 +113,51 @@ func TestOIDCSessionRenewalPreservesIssuedSecureCookiePolicy(t *testing.T) {
 	}
 	t.Fatal("OIDC renewal did not set the session cookie")
 }
+
+// Sessions issued before the cookieSecure column existed carry no stored policy, so
+// renewal has to fall back to the request origin: plain HTTP on loopback stays
+// non-Secure (LAN/NAS and local development still work), anything else is Secure.
+func TestLegacyOIDCSessionRenewalDerivesSecureCookieFromRequestOrigin(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		requestURL string
+		wantSecure bool
+	}{
+		{name: "loopback name", requestURL: "http://localhost:5080/protected", wantSecure: false},
+		{name: "loopback address", requestURL: "http://127.0.0.1:5080/protected", wantSecure: false},
+		{name: "remote host", requestURL: "http://reader.example.com/protected", wantSecure: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			r := setupSessionMiddlewareTest(t)
+			now := time.Now().UTC()
+			absolute := now.Add(2 * time.Hour)
+			if err := store.CreateSession(&model.UserSession{
+				ID: "legacy-oidc", UserID: "user", ExpiresAt: now.Add(time.Hour),
+				AuthMethod: model.SessionAuthMethodOIDC, AuthenticatedAt: now, AbsoluteExpiresAt: &absolute,
+			}); err != nil {
+				t.Fatalf("CreateSession() error = %v", err)
+			}
+			session, _, err := store.GetSessionWithUser("legacy-oidc")
+			if err != nil || session == nil || session.CookieSecure != nil {
+				t.Fatalf("legacy session precondition = %+v, %v", session, err)
+			}
+
+			request := httptest.NewRequest(http.MethodGet, testCase.requestURL, nil)
+			request.AddCookie(&http.Cookie{Name: SessionCookie, Value: "legacy-oidc"})
+			response := httptest.NewRecorder()
+			r.ServeHTTP(response, request)
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("valid session status = %d, want 204", response.Code)
+			}
+			for _, cookie := range response.Result().Cookies() {
+				if cookie.Name == SessionCookie {
+					if cookie.Secure != testCase.wantSecure {
+						t.Fatalf("renewed cookie Secure = %v, want %v", cookie.Secure, testCase.wantSecure)
+					}
+					return
+				}
+			}
+			t.Fatal("OIDC renewal did not set the session cookie")
+		})
+	}
+}

@@ -49,15 +49,6 @@ func passwordMeetsLengthRequirements(password string) bool {
 	return utf8.RuneCountInString(password) >= minimumPasswordLength && len(password) <= maximumPasswordBytes
 }
 
-func NewAuthHandler() *AuthHandler {
-	runtime, err := NewOIDCRuntime()
-	if err != nil {
-		log.Printf("[Auth] OIDC runtime initialization failed; local authentication remains available: %v", err)
-		return newAuthHandlerWithOIDC(config.OIDCConfig{}, nil, err)
-	}
-	return newAuthHandlerWithRuntime(runtime)
-}
-
 // NewOIDCRuntime resolves exactly one configuration authority and builds the
 // process-wide hot-swappable OIDC runtime used by authentication and admin UI.
 func NewOIDCRuntime() (*oidcruntime.Manager, error) {

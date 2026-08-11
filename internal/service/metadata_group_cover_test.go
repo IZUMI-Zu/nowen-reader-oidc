@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -334,6 +335,43 @@ func stubGroupCoverTransport(t *testing.T, roundTrip func(*http.Request) (*http.
 	original := http.DefaultTransport
 	http.DefaultTransport = ehRoundTripFunc(roundTrip)
 	t.Cleanup(func() { http.DefaultTransport = original })
+}
+
+// 封面服务器返回非 200 时也要关闭响应体，否则连接无法复用。
+func TestCoverDownloadsCloseNonOKResponseBodies(t *testing.T) {
+	setupGroupCoverTest(t, 906, "https://covers.example/missing.png")
+	var closed sync.WaitGroup
+	closed.Add(2)
+	stubGroupCoverTransport(t, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     http.Header{},
+			Body:       closeTrackingBody{Reader: strings.NewReader("missing"), closed: &closed},
+			Request:    req,
+		}, nil
+	})
+
+	if err := cacheCoverAsThumbnailForSource("comic-903", "https://covers.example/missing.png", ""); err == nil {
+		t.Fatal("cover cache reported success for a 404 response")
+	}
+	DownloadGroupCover(906, "https://covers.example/missing.png")
+
+	done := make(chan struct{})
+	go func() {
+		closed.Wait()
+		close(done)
+	}()
+	waitGroupCoverTestTask(t, "non-OK cover response bodies", done)
+}
+
+type closeTrackingBody struct {
+	*strings.Reader
+	closed *sync.WaitGroup
+}
+
+func (b closeTrackingBody) Close() error {
+	b.closed.Done()
+	return nil
 }
 
 func imageResponse(req *http.Request, data []byte) *http.Response {

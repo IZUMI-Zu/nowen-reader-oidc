@@ -203,6 +203,7 @@ func cacheCoverAsThumbnailForSource(comicID, coverURL, metadataSource string) er
 			}
 			return err
 		}
+		resp.Body.Close()
 		return fmt.Errorf("download cover returned HTTP %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
@@ -392,6 +393,9 @@ func downloadGroupCoverToLocalInternal(groupID int, coverURL, metadataSource, th
 
 	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return
 	}
 	defer resp.Body.Close()

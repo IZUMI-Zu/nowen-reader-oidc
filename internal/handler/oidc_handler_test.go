@@ -806,6 +806,95 @@ func TestUserManagementCannotRemoveLastBoundOIDCAdministrator(t *testing.T) {
 	}
 }
 
+func TestUserManagementPreservesLastOIDCAdministratorWhenSecretKeyIsUnavailable(t *testing.T) {
+	if err := store.InitDB(filepath.Join(t.TempDir(), "handler-oidc-admin-key-loss.db")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.CloseDB)
+	const issuer = "https://identity.example.com"
+	for _, user := range []*model.User{
+		{ID: "operator", Username: "operator", Password: "hash", Nickname: "Operator", Role: "admin"},
+		{ID: "bound-admin", Username: "bound-admin", Password: "hash", Nickname: "Bound", Role: "admin"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.LinkOIDCIdentity(context.Background(), "bound-admin", oidcauth.VerifiedIdentity{
+		Issuer: issuer, Subject: "bound-subject",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createSessionForOIDCTest(t, "operator-session", "operator", model.SessionAuthMethodPassword, time.Now().UTC())
+
+	configuredProtector, err := oidcruntime.NewAESGCMSecretProtector(
+		[]byte("0123456789abcdef0123456789abcdef"), oidcruntime.SecretProtectionExternalKey,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, keyID, err := configuredProtector.Encrypt([]byte("client-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configStore := store.OIDCConfigStore{}
+	current, err := configStore.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := configStore.Save(context.Background(), oidcruntime.SaveRequest{
+		ExpectedRevision: current.Revision,
+		Next: oidcruntime.StoredConfig{
+			Enabled: true, DisablePasswordLogin: true, IssuerURL: issuer, ClientID: "reader",
+			SecretCiphertext: ciphertext, SecretKeyID: keyID, ProviderName: "Company Login",
+			Scopes: "openid profile email", PublicURL: "https://reader.example.com", SessionTTLSeconds: 43200,
+		},
+		Audit: oidcruntime.AuditEvent{ActorUserID: "operator", Action: "test_setup", Result: "success"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	unavailableProtector, err := oidcruntime.NewAESGCMSecretProtector(
+		[]byte("fedcba9876543210fedcba9876543210"), oidcruntime.SecretProtectionExternalKey,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := oidcruntime.NewManager(context.Background(), oidcruntime.Options{
+		Source: oidcruntime.ConfigSourceDatabase, Repository: configStore, Safety: configStore,
+		Transactions: store.OIDCTransactionStore{}, Protector: unavailableProtector,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	handler := newAuthHandlerWithRuntime(runtime)
+	users := router.Group("/api/auth/users")
+	users.Use(middleware.AdminRequired())
+	users.PUT("", handler.UpdateUser)
+	users.DELETE("", handler.DeleteUserHandler)
+
+	demote := performAuthedRequest(router, http.MethodPut, "/api/auth/users", map[string]string{
+		"action": "updateRole", "userId": "bound-admin", "role": "user",
+	}, "operator-session")
+	if demote.Code != http.StatusConflict || !strings.Contains(demote.Body.String(), "oidc_admin_required") {
+		t.Fatalf("demote during secret-key recovery = %d: %s", demote.Code, demote.Body.String())
+	}
+	remove := performAuthedRequest(router, http.MethodDelete, "/api/auth/users", map[string]string{
+		"userId": "bound-admin",
+	}, "operator-session")
+	if remove.Code != http.StatusConflict || !strings.Contains(remove.Body.String(), "oidc_admin_required") {
+		t.Fatalf("delete during secret-key recovery = %d: %s", remove.Code, remove.Body.String())
+	}
+	user, err := store.GetUserByID("bound-admin")
+	if err != nil || user == nil || user.Role != "admin" {
+		t.Fatalf("protected administrator after secret-key recovery = %+v, err=%v", user, err)
+	}
+}
+
 func TestOIDCReauthRequiresTheSameLinkedIdentityAndRefreshesAuthenticationTime(t *testing.T) {
 	cfg := enabledOIDCHandlerConfig()
 	service := &fakeOIDCService{beginResult: oidcauth.AuthorizationRedirect{

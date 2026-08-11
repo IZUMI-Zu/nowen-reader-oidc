@@ -595,27 +595,28 @@ func (m *Manager) buildService(cfg config.OIDCConfig, revision int64, fingerprin
 }
 
 func (m *Manager) resolveStored(record StoredConfig, requireProvider bool) (config.OIDCConfig, error) {
+	cfg := config.OIDCConfig{
+		Enabled: record.Enabled, IssuerURL: record.IssuerURL, ClientID: record.ClientID,
+		ProviderName: record.ProviderName, Scopes: strings.Fields(record.Scopes), PublicURL: record.PublicURL,
+		AutoProvision: record.AutoProvision, DisablePasswordLogin: record.DisablePasswordLogin,
+	}
 	ttl, err := config.OIDCSessionTTLFromSeconds(record.SessionTTLSeconds)
 	if err != nil {
-		return config.OIDCConfig{}, err
+		return cfg, err
 	}
+	cfg.SessionAbsoluteTTL = ttl
 	secret := ""
 	if record.SecretCiphertext != "" {
 		if m.protector == nil {
-			return config.OIDCConfig{}, errors.New("OIDC client secret protector is unavailable")
+			return cfg, errors.New("OIDC client secret protector is unavailable")
 		}
 		plaintext, err := m.protector.Decrypt(record.SecretCiphertext)
 		if err != nil {
-			return config.OIDCConfig{}, err
+			return cfg, err
 		}
 		secret = string(plaintext)
 	}
-	cfg := config.OIDCConfig{
-		Enabled: record.Enabled, IssuerURL: record.IssuerURL, ClientID: record.ClientID, ClientSecret: secret,
-		ProviderName: record.ProviderName, Scopes: strings.Fields(record.Scopes), PublicURL: record.PublicURL,
-		AutoProvision: record.AutoProvision, SessionAbsoluteTTL: ttl,
-		DisablePasswordLogin: record.DisablePasswordLogin,
-	}
+	cfg.ClientSecret = secret
 	if m.forcePasswordLogin {
 		cfg.DisablePasswordLogin = false
 	}

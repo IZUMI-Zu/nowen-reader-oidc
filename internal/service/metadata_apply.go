@@ -310,7 +310,10 @@ func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string, rep
 		if loaded {
 			active := activeValue.(*coverDownloadState)
 			<-active.done
-			if active.coverURL == coverURL && coverCacheExists(cachePath) {
+			if active.coverURL == coverURL {
+				// 领跑者已经为同一个 URL 跑过了。成功就用它的结果；失败也不能
+				// 让每个等待者各自再打一次远端，否则一次冷缓存的封面墙会被
+				// 放大成 N 次请求。
 				return
 			}
 			// A different URL finished. Acquire the next slot so this request can
@@ -502,7 +505,7 @@ func DownloadSeriesCover(seriesID, coverURL string, metadataSources ...string) {
 		if loaded {
 			active := activeValue.(*coverDownloadState)
 			<-active.done
-			if active.coverURL == coverURL && coverCacheExists(cachePath) {
+			if active.coverURL == coverURL {
 				return
 			}
 			// A different URL finished. Take the next slot so this request can

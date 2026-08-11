@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,6 +337,40 @@ func stubGroupCoverTransport(t *testing.T, roundTrip func(*http.Request) (*http.
 	original := http.DefaultTransport
 	http.DefaultTransport = ehRoundTripFunc(roundTrip)
 	t.Cleanup(func() { http.DefaultTransport = original })
+}
+
+// 冷缓存 + 远端失败时，排在同一个封面后面的等待者不能各自再打一次远端，
+// 否则一屏未缓存的 EH 封面会被放大成 N 次请求，正好撞在 EH 的限流上。
+func TestCoverWaiterDoesNotRetryTheSameFailedURL(t *testing.T) {
+	const groupID = 907
+	const coverURL = "https://ul.ehgt.org/fail.png"
+	setupGroupCoverTest(t, groupID, coverURL)
+	var attempts atomic.Int32
+	stubGroupCoverTransport(t, func(*http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return nil, errors.New("fixture transport offline")
+	})
+
+	// 模拟一个已经在下载同一个 URL、随后失败（没有产出缓存）的领跑者。
+	leader := &coverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+	coverDownload.Store(groupCoverKey(groupID), leader)
+	waiterDone := make(chan struct{})
+	go func() {
+		defer close(waiterDone)
+		EnsureGroupCoverCached(groupID, coverURL, config.EHentaiSitePublic)
+	}()
+	select {
+	case <-waiterDone:
+		t.Fatal("waiter did not queue behind the in-flight download")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	coverDownload.Delete(groupCoverKey(groupID))
+	close(leader.done)
+	waitGroupCoverTestTask(t, "queued cover waiter", waiterDone)
+	if got := attempts.Load(); got != 0 {
+		t.Fatalf("waiter re-fetched a cover the leader had already failed on: attempts = %d", got)
+	}
 }
 
 // 封面服务器返回非 200 时也要关闭响应体，否则连接无法复用。

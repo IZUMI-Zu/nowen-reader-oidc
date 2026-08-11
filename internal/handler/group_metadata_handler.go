@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nowen-reader/nowen-reader/internal/archive"
 	"github.com/nowen-reader/nowen-reader/internal/service"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
@@ -45,7 +44,7 @@ func (h *GroupHandler) UpdateMetadata(c *gin.Context) {
 	if body.CoverURL != nil {
 		switch coverURL := *body.CoverURL; {
 		case coverURL == "":
-			archive.ClearGroupCoverCache(id)
+			service.ClearGroupCoverCache(id)
 		case strings.HasPrefix(coverURL, "http://") || strings.HasPrefix(coverURL, "https://"):
 			go service.DownloadGroupCover(id, coverURL)
 		case strings.HasPrefix(coverURL, "data:image/"):

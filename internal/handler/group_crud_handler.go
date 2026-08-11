@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nowen-reader/nowen-reader/internal/archive"
 	"github.com/nowen-reader/nowen-reader/internal/service"
 	"github.com/nowen-reader/nowen-reader/internal/store"
 )
@@ -243,7 +242,7 @@ func (h *GroupHandler) DeleteGroup(c *gin.Context) {
 	}
 
 	// 清理本地封面缓存
-	archive.ClearGroupCoverCache(id)
+	service.ClearGroupCoverCache(id)
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
@@ -467,7 +466,7 @@ func (h *GroupHandler) BatchDelete(c *gin.Context) {
 
 	// 清理本地封面缓存
 	for _, gid := range body.GroupIDs {
-		archive.ClearGroupCoverCache(gid)
+		service.ClearGroupCoverCache(gid)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "deleted": deleted})

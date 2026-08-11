@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/png"
@@ -130,6 +131,129 @@ func TestDownloadGroupCoverDoesNotLetOlderRequestOverwriteNewerURL(t *testing.T)
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatal("older in-flight cover request overwrote the newer cover")
+	}
+}
+
+func TestGroupCoverClearWaitsForCheckedRemotePublish(t *testing.T) {
+	setupGroupCoverTest(t, 904, "https://ul.ehgt.org/a.png")
+	imageA := solidPNG(t, color.RGBA{R: 255, A: 255})
+	stubGroupCoverTransport(t, func(req *http.Request) (*http.Response, error) {
+		return imageResponse(req, imageA), nil
+	})
+	checked := make(chan struct{})
+	release := make(chan struct{})
+	groupCoverBeforePublish = func(groupID int) {
+		if groupID == 904 {
+			close(checked)
+			<-release
+		}
+	}
+	t.Cleanup(func() { groupCoverBeforePublish = nil })
+
+	oldDone := make(chan struct{})
+	go func() {
+		DownloadGroupCover(904, "https://ul.ehgt.org/a.png", config.EHentaiSitePublic)
+		close(oldDone)
+	}()
+	select {
+	case <-checked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old cover did not reach the publication boundary")
+	}
+
+	empty := ""
+	if err := store.UpdateGroupMetadata(904, store.GroupMetadataUpdate{CoverURL: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	clearStarted := make(chan struct{})
+	clearDone := make(chan struct{})
+	go func() {
+		close(clearStarted)
+		ClearGroupCoverCache(904)
+		close(clearDone)
+	}()
+	<-clearStarted
+	close(release)
+	waitGroupCoverTestTask(t, "old publish", oldDone)
+	waitGroupCoverTestTask(t, "clear", clearDone)
+
+	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.GroupCoverCacheName(904))
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("old request recreated cache after cover clear: %v", err)
+	}
+}
+
+func TestGroupCoverDataURLWinsAfterCheckedRemotePublish(t *testing.T) {
+	setupGroupCoverTest(t, 905, "https://ul.ehgt.org/a.png")
+	imageA := solidPNG(t, color.RGBA{R: 255, A: 255})
+	imageB := solidPNG(t, color.RGBA{B: 255, A: 255})
+	stubGroupCoverTransport(t, func(req *http.Request) (*http.Response, error) {
+		return imageResponse(req, imageA), nil
+	})
+	checked := make(chan struct{})
+	release := make(chan struct{})
+	groupCoverBeforePublish = func(groupID int) {
+		if groupID == 905 {
+			close(checked)
+			<-release
+		}
+	}
+	t.Cleanup(func() { groupCoverBeforePublish = nil })
+
+	oldDone := make(chan struct{})
+	go func() {
+		DownloadGroupCover(905, "https://ul.ehgt.org/a.png", config.EHentaiSitePublic)
+		close(oldDone)
+	}()
+	select {
+	case <-checked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old cover did not reach the publication boundary")
+	}
+
+	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imageB)
+	if err := store.UpdateGroupMetadata(905, store.GroupMetadataUpdate{CoverURL: &dataURL}); err != nil {
+		t.Fatal(err)
+	}
+	dataDone := make(chan error, 1)
+	go func() { dataDone <- CacheGroupCoverDataURL(905, dataURL) }()
+	select {
+	case err := <-dataDone:
+		t.Fatalf("data URL publication bypassed the remote publication lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+		// The checked remote publication still owns the shared lock.
+	}
+	close(release)
+	waitGroupCoverTestTask(t, "old publish", oldDone)
+	select {
+	case err := <-dataDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("data URL cover cache did not finish")
+	}
+
+	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.GroupCoverCacheName(905))
+	got, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _, err := archive.ResizeImageToWebP(imageB, config.GetThumbnailWidth(), config.GetThumbnailHeight(), 85)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("old remote cover overwrote the newer data URL cache")
+	}
+}
+
+func waitGroupCoverTestTask(t *testing.T, name string, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s did not finish", name)
 	}
 }
 

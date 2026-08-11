@@ -32,6 +32,14 @@ type groupCoverDownloadState struct {
 var groupCoverDownload sync.Map  // groupID -> *groupCoverDownloadState
 var seriesCoverDownload sync.Map // seriesID -> chan struct{}
 
+const groupCoverPublishLockCount = 64
+
+var groupCoverPublishLocks [groupCoverPublishLockCount]sync.Mutex
+
+// Test seam invoked while the group-cover publication lock is held, after the
+// current URL check and immediately before the cache is replaced.
+var groupCoverBeforePublish func(int)
+
 // ============================================================
 // Apply metadata to comic
 // ============================================================
@@ -309,7 +317,7 @@ func downloadGroupCoverToLocal(groupID int, coverURL, metadataSource string, rep
 				return
 			}
 			if replace {
-				archive.ClearGroupCoverCache(groupID)
+				ClearGroupCoverCache(groupID)
 			}
 			downloadGroupCoverToLocalInternal(groupID, coverURL, metadataSource, thumbDir, cachePath)
 		}()
@@ -329,6 +337,23 @@ func groupCoverURLIsCurrent(groupID int, coverURL string) bool {
 	}
 	storedURL = strings.Replace(strings.TrimSpace(storedURL), "http://", "https://", 1)
 	return storedURL == coverURL
+}
+
+func groupCoverPublishLock(groupID int) *sync.Mutex {
+	index := groupID % groupCoverPublishLockCount
+	if index < 0 {
+		index = -index
+	}
+	return &groupCoverPublishLocks[index]
+}
+
+// ClearGroupCoverCache serializes cache invalidation with remote and data URL
+// publication so an older in-flight request cannot recreate a cleared cover.
+func ClearGroupCoverCache(groupID int) {
+	lock := groupCoverPublishLock(groupID)
+	lock.Lock()
+	defer lock.Unlock()
+	archive.ClearGroupCoverCache(groupID)
 }
 
 // downloadGroupCoverToLocalInternal 执行实际的封面下载和保存逻辑。
@@ -361,9 +386,15 @@ func downloadGroupCoverToLocalInternal(groupID int, coverURL, metadataSource, th
 		log.Printf("[metadata] Group cover cache failed for group %d: %v", groupID, err)
 		return
 	}
+	lock := groupCoverPublishLock(groupID)
+	lock.Lock()
+	defer lock.Unlock()
 	if !groupCoverURLIsCurrent(groupID, coverURL) {
 		// A newer handler update won while this request was in flight.
 		return
+	}
+	if groupCoverBeforePublish != nil {
+		groupCoverBeforePublish(groupID)
 	}
 	archive.ClearGroupCoverCache(groupID)
 	_ = os.WriteFile(cachePath, webpData, 0644)
@@ -394,6 +425,13 @@ func CacheGroupCoverDataURL(groupID int, coverDataURL string) error {
 	webpData, _, err := archive.ResizeImageToWebP(imgData, config.GetThumbnailWidth(), config.GetThumbnailHeight(), 85)
 	if err != nil {
 		return err
+	}
+	lock := groupCoverPublishLock(groupID)
+	lock.Lock()
+	defer lock.Unlock()
+	storedURL, err := store.GetGroupStoredCoverURL(groupID)
+	if err != nil || storedURL != coverDataURL {
+		return fmt.Errorf("group cover changed before data URL cache publication")
 	}
 	archive.ClearGroupCoverCache(groupID)
 	cachePath := filepath.Join(thumbDir, archive.GroupCoverCacheName(groupID))

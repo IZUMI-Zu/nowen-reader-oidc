@@ -332,7 +332,7 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 		return
 	}
 
-	group, ok := visibleGroupForCover(c, groupID)
+	group, ok := visibleGroupDetail(c, groupID, "")
 	if !ok {
 		return
 	}
@@ -456,9 +456,10 @@ func serveCachedMetadataCover(c *gin.Context, cachePath string) bool {
 	return true
 }
 
-func visibleGroupForCover(c *gin.Context, groupID int) (*store.ComicGroupDetail, bool) {
+// visibleGroupDetail 读取调用者有权看到的合集详情，无权限时直接写响应并返回 false。
+func visibleGroupDetail(c *gin.Context, groupID int, contentType string) (*store.ComicGroupDetail, bool) {
 	uid := getUserID(c)
-	options := store.GroupDetailOptions{UserID: uid}
+	options := store.GroupDetailOptions{UserID: uid, ContentType: contentType}
 	user, err := store.GetUserByID(uid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取用户权限失败"})

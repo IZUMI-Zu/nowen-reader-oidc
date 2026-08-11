@@ -103,41 +103,8 @@ func (h *GroupHandler) GetGroup(c *gin.Context) {
 		return
 	}
 
-	uid := getUserID(c)
-	options := store.GroupDetailOptions{UserID: uid, ContentType: c.Query("contentType")}
-	user, userErr := store.GetUserByID(uid)
-	if userErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取用户权限失败"})
-		return
-	}
-	if user == nil || user.Role != "admin" {
-		options.FilterLibraryIDs = true
-		options.LibraryIDs, err = store.GetUserAccessibleLibraryIDs(uid)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取书库权限失败"})
-			return
-		}
-		if len(options.LibraryIDs) == 0 {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
-			return
-		}
-	}
-
-	group, err := store.GetGroupByIDWithOptions(id, options)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取分组详情失败"})
-		return
-	}
-	if group == nil {
-		if options.FilterLibraryIDs {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
-		} else {
-			c.JSON(http.StatusNotFound, gin.H{"error": "分组不存在"})
-		}
-		return
-	}
-	if options.FilterLibraryIDs && group.ComicCount == 0 {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该合集"})
+	group, ok := visibleGroupDetail(c, id, c.Query("contentType"))
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, group)

@@ -608,6 +608,44 @@ func TestEHentaiCoverDownloadLogRedactsTransportURLs(t *testing.T) {
 	}
 }
 
+// overwrite=false 只补空字段：genre 已有内容时不写 genre，也就不能替换标签里的
+// gallery 身份，否则 genre 文本和 ComicTag 会指向两个不同的画廊。
+func TestApplyEHentaiMetadataKeepsGenreAndTagsTogetherWithoutOverwrite(t *testing.T) {
+	setupTestDB(t)
+	oldSource := "source:https://e-hentai.org/g/1/0123456789"
+	if _, err := store.DB().Exec(`
+		INSERT INTO "Comic" ("id", "filename", "title", "genre")
+		VALUES ('eh-no-overwrite', 'fixture.cbz', 'Fixture', ?)
+	`, "artist:existing, "+oldSource); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddTagsToComic("eh-no-overwrite", []string{"artist:existing", oldSource}); err != nil {
+		t.Fatal(err)
+	}
+
+	newSource := "source:https://exhentai.org/g/2/abcdef0123"
+	if _, err := ApplyMetadata("eh-no-overwrite", ComicMetadata{
+		Title:  "Updated",
+		Genre:  strings.Join([]string{"artist:updated", newSource}, ", "),
+		Source: config.EHentaiSiteRestricted,
+	}, "en", false); err != nil {
+		t.Fatal(err)
+	}
+
+	comic, err := store.GetComicByID("eh-no-overwrite")
+	if err != nil || comic == nil {
+		t.Fatalf("GetComicByID() error = %v", err)
+	}
+	for _, tag := range comic.Tags {
+		if tag.Name == newSource {
+			t.Fatalf("gallery identity moved to %q while genre stayed %q", newSource, comic.Genre)
+		}
+	}
+	if !strings.Contains(comic.Genre, oldSource) {
+		t.Fatalf("genre lost its gallery source: %q", comic.Genre)
+	}
+}
+
 func TestApplyEHentaiMetadataReplacesStaleGallerySourceTag(t *testing.T) {
 	setupTestDB(t)
 	if _, err := store.DB().Exec(`

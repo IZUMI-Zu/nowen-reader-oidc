@@ -102,7 +102,10 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 	if meta.Language != "" && shouldUpdate(existing.Language) {
 		updates["language"] = meta.Language
 	}
-	if meta.Genre != "" && shouldUpdate(existing.Genre) {
+	// genre 文本和 ComicTag 是同一份标签的两种存储，必须一起更新：只改其中一个
+	// 会让 genre 停留在旧画廊，而标签里的 source: 已经指向新画廊。
+	genreApplied := meta.Genre != "" && shouldUpdate(existing.Genre)
+	if genreApplied {
 		updates["genre"] = meta.Genre
 	}
 	if meta.Year != nil {
@@ -126,7 +129,7 @@ func ApplyMetadata(comicID string, meta ComicMetadata, lang string, overwrite bo
 	// gallery identity can be committed by one store transaction.
 	var tagNames []string
 	var replaceMatcher func(string) bool
-	if meta.Genre != "" {
+	if genreApplied {
 		for _, rawTag := range strings.Split(meta.Genre, ",") {
 			tagName := strings.TrimSpace(rawTag)
 			if tagName == "" {

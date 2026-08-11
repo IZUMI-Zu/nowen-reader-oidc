@@ -9,7 +9,7 @@ Nowen Reader 可以把 E-Hentai 或 ExHentai 作为一个**显式选择的漫画
 插件默认关闭，也不会加入自动刮削或批量刮削的默认数据源。只有管理员完成服务端配置，并在元数据搜索界面手动勾选 **E-Hentai / ExHentai** 时才会使用它。
 
 > [!IMPORTANT]
-> 本功能不会下载或归档画廊内容、压缩包或种子，也不调用 archiver、消耗 GP。应用用户选中的元数据时，如果选择更新封面，则会下载一张画廊封面并写入本地缩略图缓存。当前版本不提供反向图片搜索。
+> 本功能不会下载或归档画廊内容、压缩包或种子，也不调用 archiver、消耗 GP。选择 EH/EX 搜索后，结果列表会由浏览器直接向经过校验的 EH 官方 HTTPS 图片域名加载结果中提供的封面缩略图；即使之后选择跳过封面，这一步仍会暴露客户端 IP。应用用户选中的元数据且选择更新封面时，服务端会另外下载所选画廊的一张封面并写入本地缩略图缓存。当前版本不提供反向图片搜索。
 
 实现参考了 LANraragi 官方 [`Metadata/EHentai.pm`](https://github.com/Difegue/LANraragi/blob/5dd0a75ec6a96fe596090c1ddce6ca682a137b0c/lib/LANraragi/Plugin/Metadata/EHentai.pm) 和 [`Login/EHentai.pm`](https://github.com/Difegue/LANraragi/blob/5dd0a75ec6a96fe596090c1ddce6ca682a137b0c/lib/LANraragi/Plugin/Login/EHentai.pm)，参考版本固定为 [`5dd0a75`](https://github.com/Difegue/LANraragi/commit/5dd0a75ec6a96fe596090c1ddce6ca682a137b0c)。
 

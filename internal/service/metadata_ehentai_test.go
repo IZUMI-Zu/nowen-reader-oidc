@@ -139,6 +139,18 @@ func TestEHentaiBuildSearchURL(t *testing.T) {
 		}
 	})
 
+	t.Run("year and volume brackets stay in the title search", func(t *testing.T) {
+		for _, query := range []string{"(C99) [Some Circle] Real Title [2021]", "Volume [12] special"} {
+			u, err := provider.buildSearchURL(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if search := u.Query().Get("f_search"); strings.Contains(search, "gid:") {
+				t.Fatalf("query %q searched by gallery ID: %q", query, search)
+			}
+		}
+	})
+
 	t.Run("reject controls and oversized query", func(t *testing.T) {
 		if _, err := provider.buildSearchURL("bad\nquery"); !errors.Is(err, errEHInvalidQuery) {
 			t.Fatalf("control query error = %v", err)

@@ -52,7 +52,9 @@ var (
 	errEHRemote            = errors.New("E-Hentai remote request failed")
 
 	ehGalleryTokenPattern = regexp.MustCompile(`^[0-9a-fA-F]{10}$`)
-	ehTitleGIDPattern     = regexp.MustCompile(`\[([0-9]{1,12})\]`)
+	// 只把足够长的方括号数字当作画廊 ID。汉化/同人命名里的 [2021]、[01]
+	// 这类年份和卷号如果被当成 gid，整个标题就会被丢弃。
+	ehTitleGIDPattern = regexp.MustCompile(`\[([0-9]{6,12})\]`)
 	defaultEHSearchGate   = newEHIntervalLimiter(ehSearchInterval)
 	defaultEHAPIGate      = newEHIntervalLimiter(ehAPIInterval)
 )

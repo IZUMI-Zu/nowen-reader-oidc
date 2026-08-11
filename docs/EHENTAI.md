@@ -18,7 +18,7 @@ Nowen Reader 可以把 E-Hentai 或 ExHentai 作为一个**显式选择的漫画
 | 输入 | 行为 |
 |:---|:---|
 | 普通标题 | 在配置的 EH 或 EX 站点进行标题搜索，再批量读取前 10 个结果的元数据 |
-| 包含 `[gid]` 的标题 | 使用 `gid:{id}` 搜索找到 gallery token，再读取元数据 |
+| 包含 `[gid]` 的标题（6-12 位数字） | 使用 `gid:{id}` 搜索找到 gallery token，再读取元数据；`[2021]`、`[01]` 这类年份和卷号按普通标题搜索 |
 | 完整 gallery URL | 直接读取该 `gid/token`，跳过搜索页面 |
 | 漫画已有 `source:` gallery 标签 | 自动使用标签中的 `gid/token`，跳过标题搜索 |
 | 漫画已有 ASCII `artist:` 标签 | 把作者限定条件加入普通标题搜索 |

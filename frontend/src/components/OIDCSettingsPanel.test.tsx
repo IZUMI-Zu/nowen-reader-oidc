@@ -218,4 +218,18 @@ describe("OIDCSettingsPanel", () => {
     expect(mocks.probe).not.toHaveBeenCalled();
     expect(mocks.beginTestLogin).not.toHaveBeenCalled();
   });
+
+  test("tests the saved configuration even when the unsaved form is invalid", async () => {
+    mocks.get.mockResolvedValue(managedConfig());
+    mocks.beginTestLogin.mockRejectedValue({ message: "provider unavailable sentinel" });
+
+    render(<OIDCSettingsPanel />);
+
+    const ttl = await screen.findByLabelText("Maximum OIDC session (hours)");
+    fireEvent.change(ttl, { target: { value: "0.01" } });
+    fireEvent.click(screen.getByRole("button", { name: "Run real test login" }));
+
+    await waitFor(() => expect(mocks.beginTestLogin).toHaveBeenCalledOnce());
+    await screen.findByText("provider unavailable sentinel");
+  });
 });

@@ -326,6 +326,11 @@ export function OIDCSettingsPanel() {
     setBusyAction(action);
     setMessage(null);
     try {
+      if (action === "test") {
+        const result = await oidcAdminAPI.beginTestLogin();
+        window.location.assign(result.authorizationURL);
+        return;
+      }
       const fields = toOIDCAdminFields(form, text.ttlInvalid);
       const secret = clientSecret.length > 0 ? clientSecret : undefined;
       if (action === "save") {
@@ -348,9 +353,6 @@ export function OIDCSettingsPanel() {
         const result = await oidcAdminAPI.probe({ config: fields, clientSecret: secret });
         setServerConfig((current) => current ? { ...current, callbackURL: result.callbackURL } : current);
         setMessage({ kind: "success", text: `${text.probeOK} (${result.discoveryLatencyMs} ms)` });
-      } else {
-        const result = await oidcAdminAPI.beginTestLogin();
-        window.location.assign(result.authorizationURL);
       }
     } catch (error) {
       if (isReauthenticationRequired(error)) {

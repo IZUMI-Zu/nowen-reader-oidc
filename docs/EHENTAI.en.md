@@ -9,7 +9,7 @@ Nowen Reader can use E-Hentai or ExHentai as an **explicitly selected comic meta
 The plugin is disabled by default and is not included in default automatic or batch scraping sources. It is used only after an administrator configures it on the server and a user manually selects **E-Hentai / ExHentai** in the metadata source filter.
 
 > [!IMPORTANT]
-> This feature reads metadata only. It does not download galleries, images, archives, or torrents; it does not call the archiver or spend GP. Reverse-image search is not included in this version.
+> This feature does not download gallery content, gallery archives, or torrents, and it does not call the archiver or spend GP. When selected metadata is applied, choosing to update the cover downloads one gallery cover into the local thumbnail cache. Reverse-image search is not included in this version.
 
 The implementation references LANraragi's official [`Metadata/EHentai.pm`](https://github.com/Difegue/LANraragi/blob/5dd0a75ec6a96fe596090c1ddce6ca682a137b0c/lib/LANraragi/Plugin/Metadata/EHentai.pm) and [`Login/EHentai.pm`](https://github.com/Difegue/LANraragi/blob/5dd0a75ec6a96fe596090c1ddce6ca682a137b0c/lib/LANraragi/Plugin/Login/EHentai.pm), pinned to commit [`5dd0a75`](https://github.com/Difegue/LANraragi/commit/5dd0a75ec6a96fe596090c1ddce6ca682a137b0c).
 

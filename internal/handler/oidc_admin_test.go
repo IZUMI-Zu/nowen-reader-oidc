@@ -190,6 +190,32 @@ func TestOIDCAdminAPIStoresButNeverReturnsClientSecret(t *testing.T) {
 		})
 	}
 
+	// Browsers send these content types cross-origin without a preflight, so the
+	// admin API only accepts JSON. A charset parameter must still be accepted.
+	// A stale revision proves the request got past the content-type gate: it is
+	// rejected later, by the optimistic-concurrency check, with a different status.
+	validBody := `{"expectedRevision":999,"config":{"enabled":false}}`
+	for contentType, wantStatus := range map[string]int{
+		"application/x-www-form-urlencoded": http.StatusBadRequest,
+		"text/plain;charset=UTF-8":          http.StatusBadRequest,
+		"multipart/form-data; boundary=x":   http.StatusBadRequest,
+		"":                                  http.StatusBadRequest,
+		"application/json; charset=utf-8":   http.StatusConflict,
+	} {
+		t.Run("content type "+contentType, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPut, "/reader/api/admin/oidc", strings.NewReader(validBody))
+			if contentType != "" {
+				request.Header.Set("Content-Type", contentType)
+			}
+			request.AddCookie(&http.Cookie{Name: middleware.SessionCookie, Value: "admin-session"})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != wantStatus {
+				t.Fatalf("content type %q status = %d, want %d: %s", contentType, response.Code, wantStatus, response.Body.String())
+			}
+		})
+	}
+
 	oversizedBody := `{"expectedRevision":1,"clientSecret":"` + strings.Repeat("x", 70<<10) + `","config":{}}`
 	oversizedRequest := httptest.NewRequest(http.MethodPut, "/reader/api/admin/oidc", strings.NewReader(oversizedBody))
 	oversizedRequest.Header.Set("Content-Type", "application/json")
@@ -203,8 +229,9 @@ func TestOIDCAdminAPIStoresButNeverReturnsClientSecret(t *testing.T) {
 	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM "OIDCConfigAudit" WHERE "action" = 'update' AND "result" = 'failure:invalid_request'`).Scan(&rejectedAuditCount); err != nil {
 		t.Fatalf("load rejected-request audits: %v", err)
 	}
-	if rejectedAuditCount != 5 {
-		t.Fatalf("rejected-request audit count = %d, want 5", rejectedAuditCount)
+	// 4 malformed bodies + 4 rejected content types + the oversized body.
+	if rejectedAuditCount != 9 {
+		t.Fatalf("rejected-request audit count = %d, want 9", rejectedAuditCount)
 	}
 }
 

@@ -334,7 +334,7 @@ func (h *GroupHandler) BatchScrape(c *gin.Context) {
 					for _, t := range existingTags {
 						existingNames = append(existingNames, t.Name)
 					}
-					mergedTags = mergeMetadataTags(existingNames, genres)
+					mergedTags = mergeMetadataTags(existingNames, genres, update.Genre != nil)
 					applyTags = true
 				}
 			}

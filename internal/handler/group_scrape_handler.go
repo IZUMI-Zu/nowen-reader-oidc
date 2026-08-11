@@ -220,7 +220,7 @@ func (h *GroupHandler) ApplyScrapedMetadata(c *gin.Context) {
 			for _, t := range existingTags {
 				existingNames = append(existingNames, t.Name)
 			}
-			mergedTags = mergeMetadataTags(existingNames, genres)
+			mergedTags = mergeMetadataTags(existingNames, genres, update.Genre != nil)
 			applyTags = true
 		}
 	}
@@ -547,12 +547,17 @@ func splitAndTrim(s string) []string {
 	return result
 }
 
-func mergeMetadataTags(existing, incoming []string) []string {
+// mergeMetadataTags 合并现有标签与本次刮削结果。genreApplied 为 false 时（genre
+// 字段这次没写入），gallery 身份必须停在旧画廊：既不接收新的 EH source: 标签，
+// 也不删除旧的，否则展示的 genre 文本和搜索直达的画廊会是两个。
+func mergeMetadataTags(existing, incoming []string, genreApplied bool) []string {
 	replaceEHSource := false
-	for _, name := range incoming {
-		if service.IsEHentaiGallerySourceTag(name) {
-			replaceEHSource = true
-			break
+	if genreApplied {
+		for _, name := range incoming {
+			if service.IsEHentaiGallerySourceTag(name) {
+				replaceEHSource = true
+				break
+			}
 		}
 	}
 
@@ -577,6 +582,9 @@ func mergeMetadataTags(existing, incoming []string) []string {
 		appendUnique(name)
 	}
 	for _, name := range incoming {
+		if !genreApplied && service.IsEHentaiGallerySourceTag(name) {
+			continue
+		}
 		appendUnique(name)
 	}
 	return result

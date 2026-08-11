@@ -114,11 +114,16 @@ func TestApplySeriesScrapedMetadata(t *testing.T) {
 	if got := filterSeriesMetadataSources([]string{"ehentai"}, "novel"); len(got) != 0 {
 		t.Fatalf("EH source must not be accepted for novels: %#v", got)
 	}
-	if got := mergeMetadataTags(
-		[]string{"artist:old", "source:http://e-hentai.org/g/1/0123456789"},
-		[]string{"artist:new", "source:https://exhentai.org/g/2/abcdef0123"},
-	); !reflect.DeepEqual(got, []string{"artist:old", "artist:new", "source:https://exhentai.org/g/2/abcdef0123"}) {
+	existingMergeTags := []string{"artist:old", "source:http://e-hentai.org/g/1/0123456789"}
+	incomingMergeTags := []string{"artist:new", "source:https://exhentai.org/g/2/abcdef0123"}
+	if got := mergeMetadataTags(existingMergeTags, incomingMergeTags, true); !reflect.DeepEqual(
+		got, []string{"artist:old", "artist:new", "source:https://exhentai.org/g/2/abcdef0123"}) {
 		t.Fatalf("merged metadata tags = %#v", got)
+	}
+	// genre 这次没写入时，gallery 身份停在旧画廊，其余标签照常合并。
+	if got := mergeMetadataTags(existingMergeTags, incomingMergeTags, false); !reflect.DeepEqual(
+		got, []string{"artist:old", "source:http://e-hentai.org/g/1/0123456789", "artist:new"}) {
+		t.Fatalf("merged metadata tags without a genre write = %#v", got)
 	}
 	if got := resolveBatchMetadataSources([]string{"ehentai"}, "comic", true); !reflect.DeepEqual(got, []string{"ehentai"}) {
 		t.Fatalf("explicit batch EH selection was not preserved: %#v", got)

@@ -156,7 +156,7 @@ func (h *SeriesHandler) ApplyScrapedMetadata(c *gin.Context) {
 		}
 		incoming := splitAndTrim(meta.Genre)
 		if len(incoming) > 0 {
-			mergedTags = mergeMetadataTags(names, incoming)
+			mergedTags = mergeMetadataTags(names, incoming, update.Genre != nil)
 			applyTags = true
 		}
 	}

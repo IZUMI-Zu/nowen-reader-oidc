@@ -316,6 +316,51 @@ func TestEHentaiProviderSourceTagSkipsSearch(t *testing.T) {
 	}
 }
 
+// 标题里的 gid 搜不到时按序落到整条标题搜索，与 LANraragi lookup_gallery 一致。
+func TestEHentaiProviderFallsBackFromGIDSearchToTitleSearch(t *testing.T) {
+	searchFixture, err := os.ReadFile("testdata/ehentai_search.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiFixture, err := os.ReadFile("testdata/ehentai_gdata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var searchTerms []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/api.php" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(apiFixture)
+			return
+		}
+		term := req.URL.Query().Get("f_search")
+		searchTerms = append(searchTerms, term)
+		w.Header().Set("Content-Type", "text/html")
+		if strings.HasPrefix(term, "gid:") {
+			// 该 gid 早已不存在，搜索页没有任何 gallery 链接。
+			_, _ = w.Write([]byte("<html><body>No hits found</body></html>"))
+			return
+		}
+		_, _ = w.Write(searchFixture)
+	}))
+	defer server.Close()
+
+	provider := newLocalEHProvider(t, server, config.EHentaiConfig{Enabled: true, Site: config.EHentaiSitePublic})
+	results, err := provider.searchWithTags(context.Background(), "[618395] Choro Sugi", "en", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("missing gallery ended the search: terms=%v", searchTerms)
+	}
+	if len(searchTerms) != 2 || !strings.HasPrefix(searchTerms[0], "gid:") || strings.Contains(searchTerms[1], "gid:") {
+		t.Fatalf("unexpected search sequence: %v", searchTerms)
+	}
+	if !strings.Contains(searchTerms[1], "Choro Sugi") {
+		t.Fatalf("title fallback lost the title: %q", searchTerms[1])
+	}
+}
+
 // 画廊被删除或 token 失效后，作品上残留的 source: 标签不能让 EH 源变成死路。
 func TestEHentaiProviderFallsBackToTitleSearchWhenSourceGalleryIsGone(t *testing.T) {
 	searchFixture, err := os.ReadFile("testdata/ehentai_search.html")

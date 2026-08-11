@@ -257,9 +257,23 @@ func (p *ehentaiProvider) searchWithTags(ctx context.Context, query, _ string, e
 		}
 	}
 
-	refs, err := p.searchGalleryRefsWithArtist(ctx, query, artistFromEHTags(existingTags))
-	if err != nil || len(refs) == 0 {
+	artist := artistFromEHTags(existingTags)
+	refs, err := p.searchGalleryRefsWithArtist(ctx, query, artist)
+	if err != nil {
 		return nil, err
+	}
+	if len(refs) == 0 {
+		// 与 LANraragi 的 lookup_gallery 一致：标题里的 gid 搜不到时按序落到
+		// 整条标题搜索，而不是让这次查询到此为止。
+		if stripped := stripEHTitleGID(query); stripped != "" {
+			refs, err = p.searchGalleryRefsWithArtist(ctx, stripped, artist)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(refs) == 0 {
+		return nil, nil
 	}
 	if len(refs) > ehMaxSearchResults {
 		refs = refs[:ehMaxSearchResults]
@@ -382,6 +396,16 @@ func galleryRefFromEHTags(tags []string) (ehGalleryRef, bool) {
 // identities are replaced instead of accumulating.
 func IsEHentaiGallerySourceTag(tag string) bool {
 	return store.IsEHentaiGallerySourceTag(tag)
+}
+
+// stripEHTitleGID 去掉标题里被当作画廊 ID 的方括号数字，用于 gid 搜索落空后的
+// 标题回落。标题本身就只有一个 gid 时返回空串，没有可搜的标题。
+func stripEHTitleGID(query string) string {
+	match := ehTitleGIDPattern.FindString(query)
+	if match == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.Replace(query, match, " ", 1)), " ")
 }
 
 func artistFromEHTags(tags []string) string {

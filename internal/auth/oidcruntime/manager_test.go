@@ -786,3 +786,62 @@ func cloneStoredConfig(value StoredConfig) StoredConfig {
 	value.LastVerifiedAt = cloneTime(value.LastVerifiedAt)
 	return value
 }
+
+// BASE_PATH moves the callback URL, so a deployment that changes it must lose the
+// verified status instead of silently keeping a configuration the provider will reject.
+func TestBasePathChangeInvalidatesVerifiedConfiguration(t *testing.T) {
+	protector, err := NewAESGCMSecretProtector([]byte("0123456789abcdef0123456789abcdef"), SecretProtectionExternalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "client-secret"
+	ciphertext, keyID, err := protector.Encrypt([]byte(secret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.OIDCConfig{
+		Enabled: true, IssuerURL: "https://identity.example.com", ClientID: "reader", ClientSecret: secret,
+		ProviderName: "Company Login", Scopes: []string{"openid", "profile", "email"},
+		PublicURL: "https://reader.example.com", SessionAbsoluteTTL: 12 * time.Hour,
+	}
+	verified := StoredConfig{
+		Enabled: true, IssuerURL: cfg.IssuerURL, ClientID: cfg.ClientID,
+		SecretCiphertext: ciphertext, SecretKeyID: keyID, ProviderName: cfg.ProviderName,
+		Scopes: strings.Join(cfg.Scopes, " "), PublicURL: cfg.PublicURL, SessionTTLSeconds: 43200,
+		Revision: 7, VerifiedFingerprint: protocolFingerprint(cfg, "/reader", ciphertext),
+	}
+
+	adminConfigForBasePath := func(basePath string) AdminConfig {
+		t.Helper()
+		repository := newMemoryConfigRepository()
+		repository.record = cloneStoredConfig(verified)
+		repository.adminLinked = true
+		manager, err := NewManager(context.Background(), Options{
+			Source: ConfigSourceDatabase, Repository: repository, Safety: repository,
+			Transactions: &memoryTransactionStore{}, Protector: protector, BasePath: basePath,
+			ProviderFactory: func(cfg oidcauth.RemoteProviderConfig) (probeProvider, error) {
+				return &fakeProbeProvider{issuer: cfg.IssuerURL}, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := manager.AdminConfig(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	unchanged := adminConfigForBasePath("/reader")
+	if unchanged.Status != "active" {
+		t.Fatalf("verified configuration status = %q, want active", unchanged.Status)
+	}
+	moved := adminConfigForBasePath("/library")
+	if moved.CallbackURL == unchanged.CallbackURL {
+		t.Fatalf("BASE_PATH change did not move the callback URL: %q", moved.CallbackURL)
+	}
+	if moved.Status == "active" || moved.Status == "ready" {
+		t.Fatalf("configuration stayed %q after the callback URL moved", moved.Status)
+	}
+}

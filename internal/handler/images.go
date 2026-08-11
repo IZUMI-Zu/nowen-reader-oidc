@@ -338,26 +338,8 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 		return
 	}
 
-	// 尝试读取本地缓存
 	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.GroupCoverCacheName(groupID))
-	if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-		etag := fmt.Sprintf(`"%d"`, len(data))
-		if stat, err := os.Stat(cachePath); err == nil {
-			etag = fmt.Sprintf(`"%s-%s"`,
-				strconv.FormatInt(stat.ModTime().UnixMilli(), 36),
-				strconv.FormatInt(stat.Size(), 36),
-			)
-		}
-		if c.GetHeader("If-None-Match") == etag {
-			c.Header("ETag", etag)
-			c.Status(http.StatusNotModified)
-			return
-		}
-		c.Header("Content-Type", http.DetectContentType(data))
-		c.Header("Cache-Control", "public, max-age=300, must-revalidate")
-		c.Header("Content-Length", strconv.Itoa(len(data)))
-		c.Header("ETag", etag)
-		c.Data(http.StatusOK, c.Writer.Header().Get("Content-Type"), data)
+	if serveCachedMetadataCover(c, cachePath) {
 		return
 	}
 
@@ -366,13 +348,21 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 	if err == nil && rawCoverURL != "" {
 		switch {
 		case strings.HasPrefix(rawCoverURL, "http://") || strings.HasPrefix(rawCoverURL, "https://"):
+			if service.ValidateMetadataCoverURL(config.EHentaiSitePublic, rawCoverURL) == nil {
+				service.EnsureGroupCoverCached(groupID, rawCoverURL, config.EHentaiSitePublic)
+				if serveCachedMetadataCover(c, cachePath) {
+					return
+				}
+				c.JSON(http.StatusBadGateway, gin.H{"error": "EH/EX 合集封面下载失败"})
+				return
+			}
 			go service.EnsureGroupCoverCached(groupID, rawCoverURL)
+			c.Header("Referrer-Policy", "no-referrer")
 			c.Redirect(http.StatusTemporaryRedirect, rawCoverURL)
 			return
 		case strings.HasPrefix(rawCoverURL, "data:image/"):
 			if err := service.CacheGroupCoverDataURL(groupID, rawCoverURL); err == nil {
-				if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-					c.Data(http.StatusOK, http.DetectContentType(data), data)
+				if serveCachedMetadataCover(c, cachePath) {
 					return
 				}
 			}
@@ -409,30 +399,22 @@ func (h *ImageHandler) serveSeriesCoverThumbnail(c *gin.Context, seriesID string
 	}
 
 	cachePath := filepath.Join(config.GetThumbnailsDir(), archive.SeriesCoverCacheName(seriesID))
-	if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
-		etag := fmt.Sprintf(`"%d"`, len(data))
-		if stat, err := os.Stat(cachePath); err == nil {
-			etag = fmt.Sprintf(`"%s-%s"`,
-				strconv.FormatInt(stat.ModTime().UnixMilli(), 36),
-				strconv.FormatInt(stat.Size(), 36),
-			)
-		}
-		if c.GetHeader("If-None-Match") == etag {
-			c.Header("ETag", etag)
-			c.Status(http.StatusNotModified)
-			return
-		}
-		c.Header("Content-Type", http.DetectContentType(data))
-		c.Header("Cache-Control", "public, max-age=300, must-revalidate")
-		c.Header("Content-Length", strconv.Itoa(len(data)))
-		c.Header("ETag", etag)
-		c.Data(http.StatusOK, c.Writer.Header().Get("Content-Type"), data)
+	if serveCachedMetadataCover(c, cachePath) {
 		return
 	}
 
 	rawCoverURL, err := store.GetSeriesStoredCoverURL(seriesID)
 	if err == nil && (strings.HasPrefix(rawCoverURL, "http://") || strings.HasPrefix(rawCoverURL, "https://")) {
+		if service.ValidateMetadataCoverURL(config.EHentaiSitePublic, rawCoverURL) == nil {
+			service.DownloadSeriesCover(seriesID, rawCoverURL, config.EHentaiSitePublic)
+			if serveCachedMetadataCover(c, cachePath) {
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": "EH/EX 目录作品封面下载失败"})
+			return
+		}
 		go service.DownloadSeriesCover(seriesID, rawCoverURL)
+		c.Header("Referrer-Policy", "no-referrer")
 		c.Redirect(http.StatusTemporaryRedirect, rawCoverURL)
 		return
 	}
@@ -441,6 +423,32 @@ func (h *ImageHandler) serveSeriesCoverThumbnail(c *gin.Context, seriesID string
 		return
 	}
 	c.JSON(http.StatusNotFound, gin.H{"error": "目录作品封面不可用"})
+}
+
+func serveCachedMetadataCover(c *gin.Context, cachePath string) bool {
+	data, err := os.ReadFile(cachePath)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	etag := fmt.Sprintf(`"%d"`, len(data))
+	if stat, err := os.Stat(cachePath); err == nil {
+		etag = fmt.Sprintf(`"%s-%s"`,
+			strconv.FormatInt(stat.ModTime().UnixMilli(), 36),
+			strconv.FormatInt(stat.Size(), 36),
+		)
+	}
+	if c.GetHeader("If-None-Match") == etag {
+		c.Header("ETag", etag)
+		c.Status(http.StatusNotModified)
+		return true
+	}
+	contentType := http.DetectContentType(data)
+	c.Header("Content-Type", contentType)
+	c.Header("Cache-Control", "public, max-age=300, must-revalidate")
+	c.Header("Content-Length", strconv.Itoa(len(data)))
+	c.Header("ETag", etag)
+	c.Data(http.StatusOK, contentType, data)
+	return true
 }
 
 // ============================================================

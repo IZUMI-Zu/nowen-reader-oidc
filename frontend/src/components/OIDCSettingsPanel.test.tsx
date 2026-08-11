@@ -257,4 +257,25 @@ describe("OIDCSettingsPanel", () => {
     await waitFor(() => expect(mocks.beginTestLogin).toHaveBeenCalledOnce());
     await screen.findByText("provider unavailable sentinel");
   });
+
+  // The typed Client Secret must never survive the reauthentication redirect, so the
+  // panel has to record that the operator will be asked for it again on resume.
+  test.each([
+    { typed: "typed-secret-sentinel", expected: true },
+    { typed: "", expected: false },
+  ])("records secret re-entry as $expected when resuming a redirect", async ({ typed, expected }) => {
+    mocks.authUser.hasPassword = false;
+    mocks.get.mockResolvedValue(managedConfig());
+    mocks.update.mockRejectedValue({ code: "reauth_required", message: "reauthentication required" });
+
+    render(<OIDCSettingsPanel />);
+    const secretInput = await screen.findByPlaceholderText("Enter a new Client Secret");
+    if (typed) fireEvent.change(secretInput, { target: { value: typed } });
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+
+    await waitFor(() => expect(window.sessionStorage.length).toBe(1));
+    const stored = window.sessionStorage.getItem(window.sessionStorage.key(0) as string) as string;
+    expect(stored).not.toContain("typed-secret-sentinel");
+    expect(JSON.parse(stored).requiresSecretReentry).toBe(expected);
+  });
 });

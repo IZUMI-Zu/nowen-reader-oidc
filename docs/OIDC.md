@@ -291,7 +291,7 @@ OIDC 本地 Session 的绝对最大寿命。允许范围为 `5m` 到 `720h`，�
 
 > **锁定风险**
 >
-> 只有在真实 Provider 登录、管理员绑定和恢复流程全部验证后才能设为 `true`。Provider 故障或配置错误会让新登录不可用。恢复方法是设置 `OIDC_DISABLE_PASSWORD_LOGIN=false` 并重启服务。
+> 只有在真实 Provider 登录、管理员绑定和恢复流程全部验证后才能设为 `true`。Provider 故障或配置错误会让新登录不可用。通用恢复方法是设置 `OIDC_FORCE_PASSWORD_LOGIN=true` 并重启服务；只有明确使用环境托管模式时，也可以把 `OIDC_DISABLE_PASSWORD_LOGIN` 改回 `false`。
 
 ## 账号初始化与绑定
 
@@ -422,10 +422,10 @@ Issuer 是身份主键的一部分。安全迁移顺序：
 Provider 故障或配置错误造成无法登录时：
 
 ```yaml
-OIDC_DISABLE_PASSWORD_LOGIN: 'false'
+OIDC_FORCE_PASSWORD_LOGIN: 'true'
 ```
 
-重启 NowenReader，然后使用保留的本地管理员密码登录。不要通过修改数据库删除外部身份或伪造 Session。
+重启 NowenReader，然后使用保留的本地管理员密码登录。修复 Provider 或配置后，删除该恢复变量或改为 `false`。明确使用环境托管模式时，也可以把 `OIDC_DISABLE_PASSWORD_LOGIN` 改回 `false`；不要通过修改数据库删除外部身份或伪造 Session。
 
 ## 故障排查
 

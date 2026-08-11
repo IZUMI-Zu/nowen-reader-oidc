@@ -283,7 +283,7 @@ This option requires `OIDC_ENABLED=true`. It is fail-closed: a malformed value o
 
 > **Lockout Risk**
 >
-> Set this option only after testing real Provider login, administrator binding, and recovery. If the Provider or configuration fails, new logins are unavailable. Recover by setting `OIDC_DISABLE_PASSWORD_LOGIN=false` and restarting NowenReader.
+> Set this option only after testing real Provider login, administrator binding, and recovery. If the Provider or configuration fails, new logins are unavailable. The universal recovery path is to set `OIDC_FORCE_PASSWORD_LOGIN=true` and restart NowenReader. Only explicitly environment-managed deployments may instead set `OIDC_DISABLE_PASSWORD_LOGIN=false`.
 
 ## Account Bootstrap and Linking
 
@@ -414,10 +414,10 @@ Old issuer rows are not merged automatically and are not evidence of a currently
 If a Provider outage or configuration error prevents login, set:
 
 ```yaml
-OIDC_DISABLE_PASSWORD_LOGIN: 'false'
+OIDC_FORCE_PASSWORD_LOGIN: 'true'
 ```
 
-Restart NowenReader and use the retained local administrator password. Do not delete external identities or manufacture sessions directly in the database.
+Restart NowenReader and use the retained local administrator password. Remove the recovery variable or set it to `false` after repairing the Provider or configuration. An explicitly environment-managed deployment may instead set `OIDC_DISABLE_PASSWORD_LOGIN=false`; do not delete external identities or manufacture sessions directly in the database.
 
 ## Troubleshooting
 

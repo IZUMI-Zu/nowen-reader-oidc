@@ -344,7 +344,9 @@ func (h *ImageHandler) serveGroupCoverThumbnail(c *gin.Context, id string) {
 		switch {
 		case strings.HasPrefix(rawCoverURL, "http://") || strings.HasPrefix(rawCoverURL, "https://"):
 			if service.ValidateMetadataCoverURL(config.EHentaiSitePublic, rawCoverURL) == nil {
-				service.EnsureGroupCoverCached(groupID, rawCoverURL, config.EHentaiSitePublic)
+				awaitInlineCoverFetch(func() {
+					service.EnsureGroupCoverCached(groupID, rawCoverURL, config.EHentaiSitePublic)
+				})
 				if serveCachedMetadataCover(c, cachePath) {
 					return
 				}
@@ -404,7 +406,9 @@ func (h *ImageHandler) serveSeriesCoverThumbnail(c *gin.Context, seriesID string
 	rawCoverURL, err := store.GetSeriesStoredCoverURL(seriesID)
 	if err == nil && (strings.HasPrefix(rawCoverURL, "http://") || strings.HasPrefix(rawCoverURL, "https://")) {
 		if service.ValidateMetadataCoverURL(config.EHentaiSitePublic, rawCoverURL) == nil {
-			service.DownloadSeriesCover(seriesID, rawCoverURL, config.EHentaiSitePublic)
+			awaitInlineCoverFetch(func() {
+				service.DownloadSeriesCover(seriesID, rawCoverURL, config.EHentaiSitePublic)
+			})
 			if serveCachedMetadataCover(c, cachePath) {
 				return
 			}
@@ -488,6 +492,22 @@ func visibleGroupDetail(c *gin.Context, groupID int, contentType string) (*store
 		return nil, false
 	}
 	return group, true
+}
+
+// inlineCoverFetchTimeout 限制请求线程等待封面下载的时间。超时后下载在后台继续，
+// 浏览器下一次请求就能命中缓存，而不是让一屏冷封面各占一个协程等满 30 秒。
+var inlineCoverFetchTimeout = 8 * time.Second
+
+func awaitInlineCoverFetch(fetch func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fetch()
+	}()
+	select {
+	case <-done:
+	case <-time.After(inlineCoverFetchTimeout):
+	}
 }
 
 func setPrivateMetadataCoverRedirect(c *gin.Context) {

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -187,6 +188,63 @@ func TestNonEHGroupCoverRedirectSuppressesReferrer(t *testing.T) {
 	}
 	if policy := response.Header().Get("Referrer-Policy"); policy != "no-referrer" {
 		t.Fatalf("non-EH redirect referrer policy = %q", policy)
+	}
+}
+
+// 远端卡住时请求线程不能一直等下去：到点先返回，下载在后台继续。
+func TestSlowEHCoverFetchDoesNotHoldTheRequest(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	router := setupTestRouter(t)
+	if err := store.RunMigrations(); err != nil {
+		t.Fatal(err)
+	}
+	cookie := registerAndLogin(t, router)
+
+	groupID64, err := store.CreateGroup("Slow EH cover group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := int(groupID64)
+	coverURL := "https://ul.ehgt.org/g/slow.png"
+	if err := store.UpdateGroupMetadata(groupID, store.GroupMetadataUpdate{CoverURL: &coverURL}); err != nil {
+		t.Fatal(err)
+	}
+	original := http.DefaultTransport
+	// 先注册还原（LIFO 下最后执行），确保下面那个"放行并等后台下载真的结束"
+	// 的清理先跑完，否则还原全局 transport 会和在飞的下载抢同一个变量。
+	t.Cleanup(func() { http.DefaultTransport = original })
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var finishOnce sync.Once
+	http.DefaultTransport = metadataCoverRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		<-release
+		finishOnce.Do(func() { close(finished) })
+		return nil, errors.New("fixture transport released")
+	})
+	t.Cleanup(func() {
+		close(release)
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	originalTimeout := inlineCoverFetchTimeout
+	inlineCoverFetchTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { inlineCoverFetchTimeout = originalTimeout })
+
+	answered := make(chan int, 1)
+	go func() {
+		answered <- performAuthedRequest(router, http.MethodGet,
+			"/api/comics/group_"+strconv.Itoa(groupID)+"/thumbnail", nil, cookie).Code
+	}()
+	select {
+	case code := <-answered:
+		if code != http.StatusBadGateway {
+			t.Fatalf("slow cover status = %d, want 502", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request stayed blocked on the stalled cover download")
 	}
 }
 

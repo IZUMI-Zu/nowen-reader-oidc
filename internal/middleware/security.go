@@ -1,8 +1,6 @@
 package middleware
 
 import (
-	"strings"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -34,8 +32,9 @@ func SecurityHeaders() gin.HandlerFunc {
 				"connect-src 'self'; "+
 				"frame-ancestors 'self'")
 
-		// HSTS — 仅在 HTTPS 连接时发送
-		if c.Request.TLS != nil || strings.Contains(strings.ToLower(c.GetHeader("X-Forwarded-Proto")), "https") {
+		// HSTS — 仅在 HTTPS 连接时发送。IsRequestSecure 只在可信反向代理下
+		// 认可 X-Forwarded-Proto，避免直接客户端伪造该头注入 HSTS。
+		if IsRequestSecure(c) {
 			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 

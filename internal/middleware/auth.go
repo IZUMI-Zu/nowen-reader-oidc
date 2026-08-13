@@ -326,14 +326,30 @@ func authUserFromModel(user *model.User) *model.AuthUser {
 	}
 }
 
-// IsRequestSecure determines if the request is over HTTPS.
-// Checks X-Forwarded-Proto for reverse proxy scenarios (NAS/LAN).
+// IsRequestSecure determines whether the request was received over a secure
+// transport. A direct TLS connection is always secure. For reverse-proxy
+// deployments the X-Forwarded-Proto header is honored only when the direct peer
+// is an explicitly trusted proxy (TRUST_PROXY_HEADERS=true plus a non-empty
+// TRUSTED_PROXIES allowlist); otherwise a direct client could spoof the header
+// and downgrade security decisions such as the Secure cookie policy or HSTS.
 func IsRequestSecure(c *gin.Context) bool {
 	if c.Request.TLS != nil {
 		return true
 	}
-	forwarded := c.GetHeader("X-Forwarded-Proto")
-	return strings.Contains(strings.ToLower(forwarded), "https")
+	if !config.TrustProxyHeadersFrom(c.Request.RemoteAddr) {
+		return false
+	}
+	return forwardedProtoIsHTTPS(c.GetHeader("X-Forwarded-Proto"))
+}
+
+// forwardedProtoIsHTTPS reports whether the client-facing protocol in an
+// X-Forwarded-Proto chain is https. The leftmost entry is the original client
+// protocol; entries appended by downstream proxies follow.
+func forwardedProtoIsHTTPS(value string) bool {
+	if index := strings.Index(value, ","); index >= 0 {
+		value = value[:index]
+	}
+	return strings.EqualFold(strings.TrimSpace(value), "https")
 }
 
 func isLoopbackRequest(c *gin.Context) bool {

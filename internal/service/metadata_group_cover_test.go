@@ -272,7 +272,10 @@ func TestScheduleGroupCoverRefreshClearsOldCacheBeforeReturning(t *testing.T) {
 	// Hold the asynchronous worker before its own invalidation. This makes the
 	// assertion below prove that ScheduleGroupCoverRefresh itself clears the old
 	// cache synchronously instead of winning through goroutine scheduling.
-	blocked := &coverDownloadState{coverURL: coverURL, done: make(chan struct{})}
+	// Use a stale URL so that, once released, the worker sees a different-URL
+	// leader and re-acquires the slot to actually download and publish (a
+	// same-URL leader would make it return early and never signal `published`).
+	blocked := &coverDownloadState{coverURL: "https://ul.ehgt.org/stale.png", done: make(chan struct{})}
 	coverDownload.Store(groupCoverKey(groupID), blocked)
 	published := make(chan struct{})
 	groupCoverBeforePublish = func(id int) {
